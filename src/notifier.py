@@ -166,7 +166,7 @@ class Notifier:
             desktop_notification.notify(
                 title=title,
                 message=message,
-                app_name="AI Trade Bot",
+                app_name="Traot",
                 timeout=30
             )
             logger.debug("Desktop notification sent")
@@ -220,7 +220,7 @@ class Notifier:
                 $textNodes.Item(0).AppendChild($template.CreateTextNode("{title_safe}")) | Out-Null
                 $textNodes.Item(1).AppendChild($template.CreateTextNode("{message_safe}")) | Out-Null
                 $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
-                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("AI Trade Bot").Show($toast)
+                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Traot").Show($toast)
                 '''
                 subprocess.run(
                     ['powershell', '-Command', ps_script],

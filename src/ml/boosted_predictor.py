@@ -246,7 +246,6 @@ class BoostedPredictor:
 
     def _generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generate technical indicator features using pandas-ta."""
-        import pandas_ta as ta
 
         df = df.copy()
 

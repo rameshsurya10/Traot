@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Trade Bot - Setup Script
+Traot - Setup Script
 ===========================
 
 Run this script to set up everything:

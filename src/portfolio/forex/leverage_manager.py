@@ -392,9 +392,6 @@ class LeverageManager:
         position_value = position_units * entry_price
         position_margin = self.calculate_required_margin(position_value)
 
-        # Free margin available for losses
-        free_margin = account_equity - position_margin - other_margin_used
-
         # At stop out, equity = stop_out_level * total_margin
         # Loss that triggers stop out = equity - (stop_out_level * total_margin)
         total_margin = position_margin + other_margin_used

@@ -137,6 +137,7 @@ class SignalAggregator:
         # Thresholds
         self.min_confidence = self.config.get('min_confidence', 0.50)
         self.alignment_threshold = self.config.get('alignment_threshold', 1.0)
+        self.agreement_floor = self.config.get('agreement_floor', 0.8)
 
         # Statistics
         self._stats = {
@@ -298,8 +299,9 @@ class SignalAggregator:
             # 1.0 = all timeframes agree, 0.0 = perfectly split
             agreement_ratio = abs(weighted_score) / (confidence_sum + 1e-10) if confidence_sum > 0 else 0.0
             agreement_ratio = min(agreement_ratio, 1.0)
-            # Confidence = avg confidence scaled by agreement (floor 50% to avoid crushing)
-            confidence = avg_confidence * max(agreement_ratio, 0.5)
+            # Confidence = avg confidence, lightly scaled by agreement
+            # Floor prevents crushing strong signals from aligned timeframes
+            confidence = avg_confidence * max(agreement_ratio, self.agreement_floor)
 
         # Cap confidence at 1.0
         confidence = min(confidence, 1.0)

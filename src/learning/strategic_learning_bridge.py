@@ -68,7 +68,7 @@ This file makes your system TRULY INTELLIGENT by:
 
 import logging
 import threading
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from collections import deque
@@ -409,6 +409,13 @@ class StrategicLearningBridge:
         except Exception as e:
             logger.error(f"Failed to track new trade: {e}", exc_info=True)
 
+    def clear_open_trades(self) -> int:
+        """Clear all tracked open trades. Returns count cleared. Used post-replay."""
+        with self._trades_lock:
+            count = len(self._open_trades)
+            self._open_trades.clear()
+        return count
+
     def _check_and_close_trades(self, symbol: str, candle: Candle):
         """
         Check open trades for exit conditions and record outcomes.
@@ -662,44 +669,6 @@ class StrategicLearningBridge:
             stats['trading_mode_pct'] = 0.0
 
         return stats
-
-    def get_open_trades(self) -> List[dict]:
-        """Get list of currently open trades."""
-        with self._trades_lock:
-            return [
-                {
-                    'signal_id': trade.signal_id,
-                    'symbol': trade.symbol,
-                    'interval': trade.interval,
-                    'direction': trade.direction,
-                    'entry_price': trade.entry_price,
-                    'entry_time': trade.entry_time.isoformat(),
-                    'confidence': trade.confidence,
-                    'stop_loss': trade.stop_loss,
-                    'take_profit': trade.take_profit,
-                    'is_paper': trade.is_paper,
-                    'age_hours': (datetime.utcnow() - trade.entry_time).total_seconds() / 3600
-                }
-                for trade in self._open_trades.values()
-            ]
-
-    def get_mode_transitions(self, symbol: str = None, limit: int = 10) -> List[dict]:
-        """
-        Get recent mode transitions.
-
-        Args:
-            symbol: Filter by symbol (None = all)
-            limit: Max number to return
-
-        Returns:
-            List of transition dicts
-        """
-        transitions = self._mode_transitions
-
-        if symbol:
-            transitions = [t for t in transitions if t['symbol'] == symbol]
-
-        return transitions[-limit:]
 
     def stop(self):
         """Stop the bridge and underlying learning system."""

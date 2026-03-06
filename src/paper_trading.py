@@ -241,7 +241,7 @@ class PaperBrokerage(BaseBrokerage):
                     order_id=order.id,
                     event_type=OrderEventType.REJECTED,
                     order=order,
-                    message=f"Insufficient position to sell"
+                    message="Insufficient position to sell"
                 ))
                 return False
 
@@ -458,7 +458,7 @@ class PaperBrokerage(BaseBrokerage):
         if signal_id:
             order.tag = signal_id
 
-        ticket = self.place_order(order)
+        self.place_order(order)
 
         if order.status == OrderStatus.FILLED:
             logger.info(

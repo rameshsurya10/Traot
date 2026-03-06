@@ -66,10 +66,13 @@ class OutcomeTracker:
         # Retraining triggers (from config)
         # Note: self.config IS the retraining section (passed from continuous_learner)
         retrain_config = self.config
-        self.retrain_on_loss = retrain_config.get('on_loss', True)  # User requirement
+        self.retrain_on_loss = retrain_config.get('on_loss', False)  # Disabled: fires on every loss, drowns statistical triggers
         self.consecutive_loss_threshold = retrain_config.get('consecutive_loss_threshold', 3)
         self.win_rate_threshold = retrain_config.get('win_rate_threshold', 0.45)
         self.drift_threshold = retrain_config.get('drift_threshold', 0.7)
+        # High-confidence loss threshold: retrain when a loss occurs at this confidence level
+        # Mirrors the trading_threshold from confidence config so they stay in sync
+        self.high_conf_retrain_threshold = retrain_config.get('high_conf_retrain_threshold', 0.80)
 
         # Experience replay importance weights
         self.replay_loss_importance = retrain_config.get('replay_loss_importance', 2.0)
@@ -212,7 +215,7 @@ class OutcomeTracker:
                 f"[{symbol} @ {interval}] Trade outcome recorded: "
                 f"{'✓ CORRECT' if was_correct else '✗ INCORRECT'} "
                 f"(PnL: {pnl_percent:+.2f}%, confidence: {confidence:.1%})"
-                + (f" [PAPER]" if is_paper_trade else "")
+                + (" [PAPER]" if is_paper_trade else "")
             )
 
         except Exception as e:
@@ -317,16 +320,14 @@ class OutcomeTracker:
         Returns:
             (should_retrain: bool, reason: str or None)
         """
-        # Trigger 1: Immediate retrain on loss (user requirement)
+        # Trigger 1: Retrain only on high-confidence losses (on_loss=true + conf>=threshold)
+        # Low-confidence losses fall through to statistical triggers below.
+        # A model that was highly confident and wrong is suspicious; lower confidence
+        # losses are expected variance and should not trigger immediate retraining.
         if not was_correct and self.retrain_on_loss:
-            # Check if this was a high-confidence prediction
-            if confidence is not None and confidence >= 0.80:
+            if confidence is not None and confidence >= self.high_conf_retrain_threshold:
                 self._stats['retraining_triggered'] += 1
                 return (True, f"loss_high_confidence (conf={confidence:.1%})")
-            else:
-                # Still retrain, but different reason
-                self._stats['retraining_triggered'] += 1
-                return (True, "loss_immediate")
 
         # Trigger 2: Consecutive losses
         try:

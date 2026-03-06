@@ -28,10 +28,10 @@ Usage:
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
-from .constants import ROLLOVER_HOUR_UTC, FOREX_PAIRS
+from .constants import ROLLOVER_HOUR_UTC
 
 logger = logging.getLogger(__name__)
 

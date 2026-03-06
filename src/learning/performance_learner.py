@@ -19,7 +19,7 @@ This approach ensures:
 - Losing patterns are quickly corrected
 - No catastrophic forgetting (via EWC)
 
-Author: AI Trade Bot System
+Author: Traot System
 """
 
 import logging
@@ -28,7 +28,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import deque

@@ -390,7 +390,7 @@ class MT5Brokerage(BaseBrokerage):
                 "price": price,
                 "deviation": self._deviation,
                 "magic": self._magic_number,
-                "comment": "AI Trade Bot",
+                "comment": "Traot",
                 "type_time": ORDER_TIME_GTC,
                 "type_filling": filling_mode,
             }
@@ -409,7 +409,7 @@ class MT5Brokerage(BaseBrokerage):
                 "price": order.limit_price,
                 "deviation": self._deviation,
                 "magic": self._magic_number,
-                "comment": "AI Trade Bot",
+                "comment": "Traot",
                 "type_time": ORDER_TIME_GTC,
                 "type_filling": filling_mode,
             }
@@ -428,7 +428,7 @@ class MT5Brokerage(BaseBrokerage):
                 "price": order.stop_price,
                 "deviation": self._deviation,
                 "magic": self._magic_number,
-                "comment": "AI Trade Bot",
+                "comment": "Traot",
                 "type_time": ORDER_TIME_GTC,
                 "type_filling": filling_mode,
             }
@@ -755,7 +755,7 @@ class MT5Brokerage(BaseBrokerage):
                     "price": price,
                     "deviation": self._deviation,
                     "magic": self._magic_number,
-                    "comment": "AI Trade Bot close",
+                    "comment": "Traot close",
                     "type_time": ORDER_TIME_GTC,
                     "type_filling": self._get_filling_mode(mt5_symbol),
                 }

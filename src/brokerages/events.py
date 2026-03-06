@@ -7,7 +7,7 @@ Event system for order status notifications.
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .orders import Order

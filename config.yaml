@@ -37,6 +37,7 @@ timeframes:
   aggregation_method: weighted_vote
   min_confidence: 0.5
   alignment_threshold: 1.0
+  agreement_floor: 0.8
   intervals:
   - interval: 15m
     enabled: true
@@ -126,15 +127,15 @@ news:
     min_articles: 1
 currencies: null
 prediction:
-  confidence_floor: 0.45
-  confidence_ceiling: 0.65
+  confidence_floor: 0.48
+  confidence_ceiling: 0.55
   regime_penalties:
     TRENDING: 1.0
     NORMAL: 1.0
-    CHOPPY: 0.85
-    VOLATILE: 0.80
-  buy_threshold: 0.52
-  sell_threshold: 0.48
+    CHOPPY: 0.92
+    VOLATILE: 0.88
+  buy_threshold: 0.505
+  sell_threshold: 0.495
 
   fourier:
     dynamic_prob: true
@@ -235,6 +236,12 @@ prediction:
     min_confidence: 0.60
     min_kelly: 0.01
 
+  # Regime mismatch penalties (used by UnbreakablePredictor in ml/predictor.py)
+  regime_mismatch:
+    low_regime_confidence: 0.8   # Penalty when regime detection is uncertain
+    bear_buy: 0.7                # Penalty for BUY signal in BEAR regime
+    bull_sell: 0.7               # Penalty for SELL signal in BULL regime
+
   online_update:
     output_clamp_min: 0.01
     output_clamp_max: 0.99
@@ -261,15 +268,15 @@ auto_training:
 continuous_learning:
   enabled: true
   confidence:
-    trading_threshold: 0.65
+    trading_threshold: 0.80
     hysteresis: 0.05
     smoothing_alpha: 0.3
     regime_adjustment: true
   retraining:
-    on_loss: true
+    on_loss: false
     consecutive_loss_threshold: 3
     win_rate_threshold: 0.45
-    drift_threshold: 0.7
+    drift_threshold: 0.5
     min_interval_hours: 1
     max_epochs: 50
     target_confidence: 0.65
@@ -516,9 +523,21 @@ confidence_gate:
   min_threshold_clamp: 0.50
   max_threshold_clamp: 0.95
   max_history_size: 100
+trend_consensus:
+  enabled: true
+  periods: [8, 21, 55, 200]        # EMA periods: short → long term alignment
+  adx_period: 14                    # ADX trend strength filter period
+  slope_lookback: 5                 # Candles to measure EMA slope direction
+  prob_clamp_min: 0.15              # Prevent extreme overconfidence
+  prob_clamp_max: 0.85
+  ensemble_weight: 0.10             # 10% of total ensemble (reduces other weights proportionally)
 performance_tracking:
   min_signals_for_retrain_check: 20
   win_rate_retrain_threshold: 0.45
   initial_retrain_after_signals: 100
   days_between_retrains: 30
   min_signals_for_periodic_retrain: 50
+daily_report:
+  enabled: true
+  send_hour: 8             # Hour to send report (in local timezone below)
+  timezone_offset: 5.5     # UTC offset (IST = +5.5)

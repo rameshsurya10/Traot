@@ -40,7 +40,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .pip_calculator import PipCalculator
-from .constants import FOREX_PAIRS, get_pair_config
+from .constants import get_pair_config
 
 logger = logging.getLogger(__name__)
 

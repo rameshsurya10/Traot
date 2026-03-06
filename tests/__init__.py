@@ -1,5 +1,5 @@
 """
-AI Trade Bot - Test Suite
+Traot - Test Suite
 =========================
 
 Run tests with:

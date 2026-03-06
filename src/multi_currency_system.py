@@ -23,7 +23,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -31,16 +31,11 @@ import torch
 import yaml
 
 from src.analysis_engine import LSTMModel, FeatureCalculator
-from src.data_service import DataService, CachedData
 from src.advanced_predictor import AdvancedPredictor
 from src.ml.boosted_predictor import BoostedPredictor
+from src.analysis.trend_consensus import TrendConsensus
 
 logger = logging.getLogger(__name__)
-
-
-# Shared cache for training data across all currencies (prevents duplicate fetches)
-_SHARED_TRAINING_DATA_CACHE = {}
-_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -422,25 +417,14 @@ class MultiCurrencySystem:
         self.advanced_predictor = AdvancedPredictor(config=self.config)
         self.advanced_predictor.set_model_manager(self.model_manager)
         self.boosted_predictor = BoostedPredictor(config=self.config)
+        self.trend_consensus = TrendConsensus(config=self.config)
 
         # Currency configurations
         self.currencies: Dict[str, CurrencyConfig] = {}
-        self.data_services: Dict[str, DataService] = {}
         self.performance: Dict[str, PerformanceStats] = {}
-
-        # Callbacks
-        self._signal_callbacks: List[Callable] = []
-
-        # State
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
 
         # Thread safety lock for performance tracking
         self._performance_lock = threading.Lock()
-
-        # Track active retrain threads to prevent duplicates and allow cleanup
-        self._retrain_threads: Dict[str, threading.Thread] = {}
-        self._retrain_scheduled: Dict[str, bool] = {}  # Prevent duplicate retrain scheduling
 
         # Feature cache to avoid recalculating features on every predict()
         # Key: f"{symbol}_{last_timestamp}_{len(df)}" -> cached features DataFrame
@@ -481,19 +465,15 @@ class MultiCurrencySystem:
             min_signals_for_periodic_retrain=perf_cfg.get('min_signals_for_periodic_retrain', 50)
         )
 
-        # Try to load existing model (pass interval for correct path)
+        # Try to load existing LSTM model (pass interval for correct path)
         model_config = self.config.get('model', {})
         self.model_manager.load_model(symbol, model_config, interval=interval)
 
-        logger.info(f"Added currency: {symbol} on {exchange}")
+        # Try to load existing boosted model (XGBoost + LightGBM) from disk
+        if self.boosted_predictor and not self.boosted_predictor.is_symbol_fitted(symbol):
+            self.boosted_predictor._load_symbol(symbol)
 
-    def remove_currency(self, symbol: str):
-        """Remove a currency pair."""
-        if symbol in self.currencies:
-            del self.currencies[symbol]
-            if symbol in self.data_services:
-                del self.data_services[symbol]
-            logger.info(f"Removed currency: {symbol}")
+        logger.info(f"Added currency: {symbol} on {exchange}")
 
     def _get_cached_features(self, symbol: str, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -532,23 +512,6 @@ class MultiCurrencySystem:
             self._feature_cache[cache_key] = df_features
 
             return df_features
-
-    def get_available_currencies(self) -> List[str]:
-        """Get list of supported currency pairs."""
-        # Popular forex pairs
-        forex = [
-            "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF",
-            "AUD/USD", "NZD/USD", "USD/CAD", "EUR/GBP",
-            "EUR/JPY", "GBP/JPY"
-        ]
-
-        # Popular crypto pairs
-        crypto = [
-            "BTC/USD", "ETH/USD", "BNB/USD", "XRP/USD",
-            "SOL/USD", "ADA/USD", "DOGE/USD", "DOT/USD"
-        ]
-
-        return forex + crypto
 
     def predict(self, symbol: str, df: pd.DataFrame) -> Optional[Dict]:
         """
@@ -607,25 +570,29 @@ class MultiCurrencySystem:
                     logger.debug(f"Boosted prediction failed for {symbol}: {e}")
 
             # Blend LSTM + boosting (boosting gets higher weight — it's more accurate)
+            from src.core.constants import blend_probabilities
             boost_cfg = self.config.get('boosting', {})
-            boost_weight = boost_cfg.get('ensemble_weight', 0.6)
-            lstm_weight = 1.0 - boost_weight
-
             has_lstm = model is not None and lstm_prob != 0.5
+            combined_prob = blend_probabilities(
+                lstm_prob=lstm_prob, boost_prob=boost_prob,
+                has_lstm=has_lstm, has_boost=has_boost,
+                boost_weight=boost_cfg.get('ensemble_weight', 0.6),
+            )
 
-            if has_lstm and has_boost:
-                combined_prob = lstm_weight * lstm_prob + boost_weight * boost_prob
-            elif has_boost:
-                combined_prob = boost_prob
-            elif has_lstm:
-                combined_prob = lstm_prob
-            else:
-                combined_prob = 0.5
+            # Get trend consensus signal (multi-period EMA alignment, replaces LLM)
+            trend_prob = None
+            if self.trend_consensus.is_available:
+                try:
+                    interval = self.currencies[symbol].interval if symbol in self.currencies else "1h"
+                    trend_prob = self.trend_consensus.get_signal(symbol, df, interval=interval)
+                except Exception as e:
+                    logger.debug(f"Trend consensus skipped for {symbol}: {e}")
 
             # Get advanced mathematical prediction
             atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
             advanced_result = self.advanced_predictor.predict(
-                df=df, symbol=symbol, lstm_probability=combined_prob, atr=atr
+                df=df, symbol=symbol, lstm_probability=combined_prob, atr=atr,
+                trend_probability=trend_prob,
             )
 
             # Build result
@@ -650,7 +617,8 @@ class MultiCurrencySystem:
                     'kalman_trend': advanced_result.kalman_trend,
                     'entropy_regime': advanced_result.entropy_regime,
                     'markov_probability': advanced_result.markov_probability,
-                    'monte_carlo_risk': advanced_result.monte_carlo_risk
+                    'monte_carlo_risk': advanced_result.monte_carlo_risk,
+                    'trend_probability': advanced_result.trend_probability,
                 },
 
                 # Model info
@@ -665,98 +633,6 @@ class MultiCurrencySystem:
             logger.error(f"Prediction failed for {symbol}: {e}")
             return None
 
-    def record_outcome(self, symbol: str, was_correct: bool, pnl_percent: float):
-        """
-        Record trade outcome for performance tracking.
-
-        Args:
-            symbol: Currency pair
-            was_correct: Whether prediction was correct
-            pnl_percent: Profit/loss percentage
-        """
-        should_schedule = False
-
-        with self._performance_lock:
-            if symbol in self.performance:
-                self.performance[symbol].add_result(was_correct, pnl_percent)
-                needs_retrain = self.performance[symbol].needs_retrain
-                already_scheduled = self._retrain_scheduled.get(symbol, False)
-
-                # Atomically check and set to prevent race condition
-                # This ensures only ONE thread can schedule retrain for this symbol
-                if needs_retrain and not already_scheduled:
-                    self._retrain_scheduled[symbol] = True  # Set flag inside lock!
-                    should_schedule = True
-
-        # Schedule outside lock to prevent deadlock (flag already set atomically above)
-        if should_schedule:
-            logger.info(f"Performance degraded for {symbol}, scheduling retrain")
-            self._schedule_retrain(symbol)
-
-    def _schedule_retrain(self, symbol: str):
-        """Schedule model retraining in background with thread tracking."""
-        def retrain_task():
-            try:
-                logger.info(f"[{threading.current_thread().name}] Starting background retrain for {symbol}")
-
-                # Performance: Check shared cache first (1-hour TTL prevents duplicate fetches)
-                cache_key = f"training_data_{symbol}"
-                df = None
-
-                with _CACHE_LOCK:
-                    if cache_key in _SHARED_TRAINING_DATA_CACHE:
-                        cached = _SHARED_TRAINING_DATA_CACHE[cache_key]
-                        if cached.is_valid():
-                            logger.info(f"Using cached training data for {symbol} (cache age: {(datetime.utcnow() - cached.timestamp).seconds}s)")
-                            df = cached.data.copy()
-                        else:
-                            del _SHARED_TRAINING_DATA_CACHE[cache_key]
-
-                # Fetch fresh data if not cached
-                if df is None:
-                    data_service = DataService()
-                    try:
-                        logger.info(f"Fetching 50K candles for {symbol} (cache miss)")
-                        df = data_service.get_candles(limit=50000)
-
-                        # Store in shared cache with 1-hour TTL (3600s)
-                        with _CACHE_LOCK:
-                            _SHARED_TRAINING_DATA_CACHE[cache_key] = CachedData(df, cache_duration=3600)
-                            logger.info(f"Cached training data for {symbol} (90% reduction in DB I/O)")
-                    finally:
-                        pass
-
-                if df is not None and len(df) >= 1000:
-                    success = self.auto_trainer.train_model(symbol, df)
-                    if success:
-                        with self._performance_lock:
-                            self.performance[symbol].last_retrain = datetime.utcnow()
-                        logger.info(f"Retrain completed for {symbol}")
-                else:
-                    logger.warning(f"Insufficient data for retrain: {len(df) if df is not None else 0} candles")
-
-            except Exception as e:
-                logger.error(f"Retrain task failed for {symbol}: {e}")
-            finally:
-                # Cleanup: Mark retrain as complete and remove thread reference atomically
-                with self._performance_lock:
-                    self._retrain_scheduled[symbol] = False
-                    if symbol in self._retrain_threads:
-                        del self._retrain_threads[symbol]
-                logger.info(f"[{threading.current_thread().name}] Retrain task finished for {symbol}")
-
-        # Create thread
-        thread = threading.Thread(target=retrain_task, daemon=True, name=f"Retrain-{symbol}")
-
-        # Register thread BEFORE starting it (prevents race where thread completes before registration)
-        # NOTE: _retrain_scheduled[symbol] already set to True in record_outcome() atomically
-        with self._performance_lock:
-            self._retrain_threads[symbol] = thread
-
-        # Start thread after registration (outside lock to prevent blocking)
-        thread.start()
-        logger.info(f"Retrain thread started for {symbol}")
-
     def get_performance_report(self) -> Dict:
         """Get performance statistics for all currencies (thread-safe)."""
         report = {}
@@ -768,131 +644,17 @@ class MultiCurrencySystem:
                     'total_pnl': f"{stats.total_pnl_percent:.2f}%",
                     'needs_retrain': stats.needs_retrain,
                     'last_retrain': stats.last_retrain.isoformat() if stats.last_retrain else 'Never',
-                    'retrain_in_progress': self._retrain_scheduled.get(symbol, False)
                 }
         return report
 
-    def register_signal_callback(self, callback: Callable):
-        """Register callback for new signals."""
-        self._signal_callbacks.append(callback)
-
     def get_status(self) -> Dict:
         """Get system status."""
-        with self._performance_lock:
-            active_retrains = [symbol for symbol, scheduled in self._retrain_scheduled.items() if scheduled]
-
         return {
-            'running': self._running,
             'currencies': list(self.currencies.keys()),
             'loaded_models': list(self.model_manager.loaded_models.keys()),
             'performance': self.get_performance_report(),
-            'active_retrains': active_retrains
         }
 
     def cleanup(self):
-        """Cleanup resources and wait for active retrain threads to complete."""
-        logger.info("Cleaning up MultiCurrencySystem...")
-
-        with self._performance_lock:
-            active_threads = list(self._retrain_threads.values())
-
-        # Wait for all retrain threads to complete (with timeout)
-        for thread in active_threads:
-            if thread.is_alive():
-                logger.info(f"Waiting for {thread.name} to complete...")
-                thread.join(timeout=5.0)  # Wait max 5 seconds per thread
-                if thread.is_alive():
-                    logger.warning(f"{thread.name} still running after timeout")
-
+        """Cleanup resources."""
         logger.info("MultiCurrencySystem cleanup complete")
-
-
-# Configuration template for multi-currency
-MULTI_CURRENCY_CONFIG = """
-# Multi-Currency Trading System Configuration
-# ============================================
-
-# Add this to your config.yaml or use as separate file
-
-currencies:
-  # Forex pairs (use with Twelve Data, MT5, etc.)
-  - symbol: "EUR/USD"
-    exchange: "twelvedata"
-    interval: "1h"
-    enabled: true
-
-  - symbol: "GBP/USD"
-    exchange: "twelvedata"
-    interval: "1h"
-    enabled: true
-
-  - symbol: "USD/JPY"
-    exchange: "twelvedata"
-    interval: "1h"
-    enabled: false  # Disabled example
-
-  # Crypto pairs (use with Coinbase, Binance, etc.)
-  - symbol: "BTC/USD"
-    exchange: "coinbase"
-    interval: "1h"
-    enabled: true
-
-  - symbol: "ETH/USD"
-    exchange: "coinbase"
-    interval: "1h"
-    enabled: true
-
-# Auto-training settings
-auto_training:
-  enabled: true
-  min_trades_before_retrain: 50
-  max_days_between_retrain: 30
-  min_win_rate_threshold: 0.45  # Retrain if below this
-
-# Model settings per currency (can be customized)
-model:
-  models_dir: "models/currencies"
-  sequence_length: 60
-  hidden_size: 128
-  num_layers: 2
-  dropout: 0.2
-
-# Algorithm weights (customize per preference)
-algorithm_weights:
-  fourier: 0.15   # Cycle detection
-  kalman: 0.25    # Trend estimation
-  entropy: 0.10   # Regime detection
-  markov: 0.20    # State transitions
-  lstm: 0.30      # Pattern learning
-"""
-
-
-def print_config_template():
-    """Print configuration template."""
-    print(MULTI_CURRENCY_CONFIG)
-
-
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s | %(levelname)s | %(message)s'
-    )
-
-    print("="*60)
-    print("MULTI-CURRENCY TRADING SYSTEM")
-    print("="*60)
-
-    # Initialize system
-    system = MultiCurrencySystem()
-
-    # Show available currencies
-    print("\nAvailable currencies:")
-    for currency in system.get_available_currencies():
-        print(f"  - {currency}")
-
-    # Print config template
-    print("\n" + "="*60)
-    print("CONFIGURATION TEMPLATE:")
-    print("="*60)
-    print_config_template()

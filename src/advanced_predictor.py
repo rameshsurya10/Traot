@@ -20,7 +20,7 @@ import threading
 import numpy as np
 import pandas as pd
 import torch
-from typing import Dict, List, Optional, Tuple, NamedTuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from scipy.fft import fft, fftfreq
 from src.analysis_engine import FeatureCalculator
@@ -99,6 +99,9 @@ class PredictionResult:
 
     # LSTM input probability (for backward compatibility)
     lstm_probability: float = 0.5  # Input LSTM probability passed to predict()
+
+    # Trend consensus signal (multi-period EMA alignment)
+    trend_probability: Optional[float] = None  # Trend consensus probability 0-1
 
 
 # =============================================================================
@@ -264,14 +267,11 @@ class KalmanFilter:
             return self._default_result(prices[-1] if len(prices) > 0 else 0)
 
         try:
-            n = len(prices)
-
             # Initialize state
             x_est = prices[0]  # Initial estimate
             P = self.initial_error_covariance  # Initial error covariance
 
             filtered_prices = []
-            velocities = []  # Price velocity (trend)
 
             for z in prices:
                 # Prediction step
@@ -792,8 +792,8 @@ class AdvancedPredictor:
 
         # Confidence calibration from config
         pred_config = self.config.get('prediction', {})
-        self.confidence_floor = pred_config.get('confidence_floor', 0.52)
-        self.confidence_ceiling = pred_config.get('confidence_ceiling', 0.72)
+        self.confidence_floor = pred_config.get('confidence_floor', 0.48)
+        self.confidence_ceiling = pred_config.get('confidence_ceiling', 0.55)
         self.regime_penalties = pred_config.get('regime_penalties', {
             'TRENDING': 1.0,
             'NORMAL': 1.0,
@@ -804,10 +804,10 @@ class AdvancedPredictor:
         if self.confidence_floor >= self.confidence_ceiling:
             logger.warning(
                 f"confidence_floor ({self.confidence_floor}) >= ceiling ({self.confidence_ceiling}), "
-                f"using defaults (0.52, 0.72)"
+                f"using defaults (0.48, 0.55)"
             )
-            self.confidence_floor = 0.52
-            self.confidence_ceiling = 0.72
+            self.confidence_floor = 0.48
+            self.confidence_ceiling = 0.55
 
         # Buy/sell thresholds
         self.buy_threshold = pred_config.get('buy_threshold', 0.52)
@@ -823,6 +823,10 @@ class AdvancedPredictor:
         self.mc_scaling = ens_cfg.get('mc_scaling', 20)
         self.mc_clamp_min = ens_cfg.get('mc_clamp_min', 0.2)
         self.mc_clamp_max = ens_cfg.get('mc_clamp_max', 0.8)
+
+        # Trend consensus weight (added dynamically like sentiment)
+        tc_cfg = self.config.get('trend_consensus', {})
+        self.trend_weight = tc_cfg.get('ensemble_weight', 0.10)
 
         # Dynamic probability config
         fourier_cfg = pred_config.get('fourier', {})
@@ -1042,6 +1046,7 @@ class AdvancedPredictor:
         atr: Optional[float] = None,
         sentiment_features: Optional[Dict] = None,
         interval: str = None,  # Alias for timeframe (backward compatibility)
+        trend_probability: Optional[float] = None,  # Trend consensus signal
         **kwargs  # Accept extra params for forward compatibility
     ) -> PredictionResult:
         """
@@ -1179,19 +1184,36 @@ class AdvancedPredictor:
         mc_prob = max(self.mc_clamp_min, min(self.mc_clamp_max, mc_prob))
         prob_scores.append(('monte_carlo', mc_prob))
 
+        # Trend consensus contribution (if available)
+        has_trend = trend_probability is not None and trend_probability != 0.5
+        if has_trend:
+            prob_scores.append(('trend', trend_probability))
+
         # Sentiment contribution (if available)
-        if sentiment_features:
+        has_sentiment = bool(sentiment_features)
+        if has_sentiment:
             prob_scores.append(('sentiment', sentiment_prob))
-            # Adjust weights to include sentiment
-            weights_with_sentiment = self.weights.copy()
-            weights_with_sentiment['sentiment'] = self.sentiment_weight
-            # Normalize other weights
-            total_other = sum(self.weights.values())
-            non_sentiment = 1.0 - self.sentiment_weight
+
+        # Build dynamic weights: start from base, add optional signals, renormalize
+        active_weights = self.weights.copy()
+        optional_weight_total = 0.0
+
+        if has_trend:
+            active_weights['trend'] = self.trend_weight
+            optional_weight_total += self.trend_weight
+
+        if has_sentiment:
+            active_weights['sentiment'] = self.sentiment_weight
+            optional_weight_total += self.sentiment_weight
+
+        # Normalize base weights down to make room for optional signals
+        if optional_weight_total > 0:
+            base_total = sum(self.weights.values())
+            scale = (1.0 - optional_weight_total) / base_total if base_total > 0 else 1.0
             for key in self.weights:
-                weights_with_sentiment[key] = self.weights[key] * non_sentiment / total_other
-        else:
-            weights_with_sentiment = self.weights
+                active_weights[key] = self.weights[key] * scale
+
+        weights_with_sentiment = active_weights
 
         # Weighted ensemble
         ensemble_prob = sum(
@@ -1427,7 +1449,10 @@ class AdvancedPredictor:
             ensemble_weights=weights_with_sentiment.copy(),
 
             # LSTM probability (input preserved for backward compatibility)
-            lstm_probability=lstm_probability
+            lstm_probability=lstm_probability,
+
+            # Trend consensus (optional)
+            trend_probability=trend_probability,
         )
 
 

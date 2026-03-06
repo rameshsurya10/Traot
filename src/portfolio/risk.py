@@ -13,12 +13,11 @@ Features:
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Dict, List, Optional, TYPE_CHECKING
 from enum import Enum
 
 if TYPE_CHECKING:
-    from .manager import PortfolioManager, PortfolioTarget
+    from .manager import PortfolioManager
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +236,7 @@ class MaximumPositionSizeRisk(RiskModel):
             return RiskAssessment(
                 action=RiskAction.REDUCE,
                 adjusted_quantity=allowed_qty,
-                reason=f"Reduced for total exposure limit",
+                reason="Reduced for total exposure limit",
                 risk_score=total_exposure
             )
 

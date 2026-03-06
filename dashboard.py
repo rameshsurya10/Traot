@@ -1,5 +1,5 @@
 """
-AI Trade Bot - Unified Dashboard
+Traot - Unified Dashboard
 =================================
 Streamlined dashboard with consolidated navigation.
 
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
-    page_title="AI Trade Bot",
+    page_title="Traot",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -4880,7 +4880,7 @@ def main():
     """Main application."""
     # Sidebar navigation
     with st.sidebar:
-        st.markdown("## AI Trade Bot")
+        st.markdown("## Traot")
         st.markdown("---")
 
         # Page selection (dynamic based on market mode)

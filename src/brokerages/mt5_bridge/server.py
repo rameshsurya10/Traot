@@ -4,7 +4,7 @@ MT5 Bridge Server (Windows-side)
 
 TCP server that wraps the MetaTrader5 Python package.
 Runs on a Windows machine alongside the MT5 terminal.
-Accepts connections from the AI Trade Bot running on Linux.
+Accepts connections from the Traot running on Linux.
 
 Usage:
     python -m src.brokerages.mt5_bridge.server --host 127.0.0.1 --port 5555

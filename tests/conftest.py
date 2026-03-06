@@ -1,5 +1,5 @@
 """
-Pytest Fixtures for AI Trade Bot
+Pytest Fixtures for Traot
 =================================
 
 Shared test fixtures used across all test files.

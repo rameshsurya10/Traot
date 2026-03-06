@@ -178,7 +178,7 @@ class Signal:
 
         lines = [
             f"{emoji} {self.strength.value} {direction} SIGNAL {strength_emoji}",
-            f"",
+            "",
             f"📊 Price: ${self.price:,.2f}",
             f"🎯 Confidence: {self.confidence:.1%}",
         ]
@@ -186,15 +186,15 @@ class Signal:
         if self.stop_loss and self.take_profit:
             rr = self.risk_reward_ratio or 0
             lines.extend([
-                f"",
-                f"📍 Levels:",
+                "",
+                "📍 Levels:",
                 f"   🛑 Stop Loss: ${self.stop_loss:,.2f}",
                 f"   ✅ Take Profit: ${self.take_profit:,.2f}",
                 f"   📏 Risk:Reward = 1:{rr:.1f}",
             ])
 
         lines.extend([
-            f"",
+            "",
             f"⏰ Time: {self.timestamp}",
         ])
 

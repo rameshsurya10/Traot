@@ -15,9 +15,8 @@ Research: Wiley 2025 - SVMD-LSTM Hybrid Approach for Stock Market Prediction
 """
 
 import numpy as np
-from scipy.signal import hilbert
 from scipy.fft import fft, ifft, fftfreq
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from dataclasses import dataclass
 import logging
 
@@ -215,7 +214,6 @@ class SVMDDecomposer:
         Returns:
             DataFrame with added IMF columns and DecompositionResult
         """
-        import pandas as pd
 
         signal = df[column].values
         result = self.decompose(signal)

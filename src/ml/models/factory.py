@@ -8,7 +8,7 @@ Handles model availability and provides fallbacks.
 
 import numpy as np
 import torch
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 import logging
 
 from .tcn_lstm import TCNLSTMAttention, SimpleLSTM

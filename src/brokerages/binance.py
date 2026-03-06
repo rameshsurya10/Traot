@@ -118,8 +118,8 @@ class BinanceBrokerage(BaseBrokerage):
                 testnet=self.testnet
             )
 
-            # Verify connection
-            account = self._client.get_account()
+            # Verify connection (call get_account to validate API keys)
+            self._client.get_account()
             self._is_connected = True
 
             # Cache symbol info for precision

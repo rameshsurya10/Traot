@@ -244,7 +244,6 @@ def calculate_metrics(trades: List[Dict[str, Any]]) -> BacktestMetrics:
         metrics.medium_signal_win_rate = medium_winners / len(medium_trades)
 
     # Streak analysis
-    current_streak = 0
     max_win_streak = 0
     max_lose_streak = 0
     win_streak = 0

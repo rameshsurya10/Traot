@@ -20,8 +20,8 @@ Sources:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional, Tuple, Union
-from sklearn.model_selection import KFold, TimeSeriesSplit
+from typing import Dict, Any, Optional, Union
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 import torch
@@ -169,7 +169,7 @@ class StackingEnsemble:
                 else:
                     # Sklearn-style model
                     X_train, X_val = X[train_idx], X[val_idx]
-                    y_train, y_val = y[train_idx], y[val_idx]
+                    y_train = y[train_idx]
 
                     if fit_base_models:
                         model.fit(X_train, y_train)

@@ -23,14 +23,13 @@ Usage:
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional, Dict
+from typing import TYPE_CHECKING, Optional
 
 from ..risk import RiskModel, RiskAssessment, RiskAction
 from .leverage_manager import LeverageManager
 from .spread_tracker import SpreadTracker
 from .constants import (
     US_MAX_LEVERAGE,
-    FOREX_PAIRS,
     CORRELATION_GROUPS,
     is_forex_pair,
 )

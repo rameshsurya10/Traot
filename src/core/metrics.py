@@ -13,8 +13,8 @@ import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +189,6 @@ class MetricsCalculator:
 
         # Calculate max drawdown duration
         in_drawdown = drawdown < 0
-        drawdown_starts = in_drawdown & ~in_drawdown.shift(1).fillna(False)
-        drawdown_ends = ~in_drawdown & in_drawdown.shift(1).fillna(False)
 
         max_duration = 0
         current_duration = 0
@@ -290,7 +288,7 @@ class MetricsCalculator:
                     entry = pd.to_datetime(t['entry_time'])
                     exit_ = pd.to_datetime(t['exit_time'])
                     durations.append((exit_ - entry).total_seconds() / 60)
-                except:
+                except (ValueError, TypeError, KeyError):
                     pass
 
         avg_duration = np.mean(durations) if durations else 0

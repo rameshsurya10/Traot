@@ -1,5 +1,5 @@
 """
-AI Trade Bot - Professional Trading Signal System
+Traot - Professional Trading Signal System
 =================================================
 
 A production-ready trading signal system with ML predictions.
@@ -32,7 +32,7 @@ Quick Start:
 """
 
 __version__ = "3.0.0"
-__author__ = "AI Trade Bot"
+__author__ = "Traot"
 
 # Core services (non-torch)
 try:

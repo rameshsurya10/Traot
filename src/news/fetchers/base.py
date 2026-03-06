@@ -10,7 +10,7 @@ All news fetchers must inherit from this class and implement the fetch() method.
 import logging
 import hashlib
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List
 from datetime import datetime
 
 from ..types import Article

@@ -276,7 +276,7 @@ class PerformanceTracker:
             else:
                 lines.append("STATUS: LOSING - Consider stopping or adjusting")
         else:
-            lines.append(f"STATUS: INSUFFICIENT DATA - Need 20+ trades")
+            lines.append("STATUS: INSUFFICIENT DATA - Need 20+ trades")
 
         lines.append("=" * 60)
 

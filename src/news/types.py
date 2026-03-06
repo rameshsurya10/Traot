@@ -7,7 +7,7 @@ Data classes for news articles and sentiment analysis results.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 
 @dataclass

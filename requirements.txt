@@ -1,4 +1,4 @@
-# AI Trade Bot - Requirements
+# Traot - Requirements
 # Professional Trading Signal System v2.0
 
 # =============================================================================

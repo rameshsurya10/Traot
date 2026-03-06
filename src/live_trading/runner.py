@@ -14,6 +14,7 @@ Similar to Lean's AlgorithmManager but simplified.
 """
 
 import logging
+import os
 import threading
 import time
 import traceback
@@ -34,7 +35,7 @@ import pandas as pd
 from src.core.config import Config
 from src.core.database import Database
 from src.brokerages.base import BaseBrokerage
-from src.brokerages.orders import Order, OrderType, OrderSide, OrderStatus
+from src.brokerages.orders import Order, OrderType, OrderSide
 from src.brokerages.events import OrderEvent, OrderEventType
 from src.portfolio.manager import PortfolioManager, InsightDirection
 from src.portfolio.risk import RiskManager, RiskAction, MaximumDrawdownRisk, MaximumPositionSizeRisk
@@ -172,6 +173,11 @@ class LiveTradingRunner:
             config_path: Path to configuration file
             mode: Trading mode (paper, live, shadow)
         """
+        # SAFETY: Block live trading at the engine level
+        if mode == TradingMode.LIVE:
+            logger.warning("BLOCKED: Live trading is disabled at engine level. Falling back to PAPER.")
+            mode = TradingMode.PAPER
+
         self.mode = mode
         self.config = Config.load(config_path)
         self._config_path = config_path
@@ -230,6 +236,9 @@ class LiveTradingRunner:
         self._on_order: List[Callable[[Order], None]] = []
         self._on_error: List[Callable[[Exception], None]] = []
 
+        # Daily report scheduler
+        self._daily_report = None
+
         # Stats
         self._start_time: Optional[datetime] = None
         self._total_signals = 0
@@ -278,11 +287,6 @@ class LiveTradingRunner:
             self._stop_stream(symbol)
             logger.info(f"Removed trading symbol: {symbol}")
 
-    def enable_symbol(self, symbol: str, enabled: bool = True):
-        """Enable or disable a symbol."""
-        if symbol in self._symbols:
-            self._symbols[symbol].enabled = enabled
-
     # =========================================================================
     # LIFECYCLE
     # =========================================================================
@@ -308,6 +312,9 @@ class LiveTradingRunner:
             # Pre-fill forex data from Twelve Data BEFORE training
             self._backfill_forex_data()
 
+            # Pre-fill crypto data from Binance BEFORE training
+            self._backfill_crypto_data()
+
             # Ensure models are ready (auto-train if needed)
             self._ensure_models_ready()
 
@@ -323,6 +330,9 @@ class LiveTradingRunner:
 
             # Start processing threads
             self._start_threads()
+
+            # Start daily report email scheduler
+            self._start_daily_report()
 
             self._start_time = datetime.utcnow()
             self._set_status(RunnerStatus.RUNNING)
@@ -402,6 +412,11 @@ class LiveTradingRunner:
             self._learning_bridge.stop()
             logger.info("Strategic Learning Bridge stopped")
 
+        # Stop daily report scheduler
+        if self._daily_report:
+            self._daily_report.stop()
+            self._daily_report = None
+
         self._set_status(RunnerStatus.STOPPED)
         logger.info("Live trading stopped")
 
@@ -459,18 +474,24 @@ class LiveTradingRunner:
         else:
             logger.info("News collection disabled in config")
 
-        # Portfolio Manager
+        # Portfolio Manager (config-driven)
+        portfolio_cfg = self.config.raw.get('portfolio', {})
+        risk_cfg = self.config.raw.get('risk', {})
         initial_cash = self.config.brokerage.initial_cash
         self._portfolio = PortfolioManager(
             initial_cash=initial_cash,
-            max_position_percent=0.25,
-            max_total_positions=10
+            max_position_percent=portfolio_cfg.get('max_position_percent', 0.25),
+            max_total_positions=portfolio_cfg.get('max_total_positions', 10),
         )
 
-        # Risk Manager
+        # Risk Manager (config-driven)
         self._risk_manager = RiskManager()
-        self._risk_manager.add_model(MaximumDrawdownRisk(max_drawdown_percent=20.0))
-        self._risk_manager.add_model(MaximumPositionSizeRisk(max_position_percent=0.25))
+        self._risk_manager.add_model(MaximumDrawdownRisk(
+            max_drawdown_percent=risk_cfg.get('max_drawdown_percent', 20.0)
+        ))
+        self._risk_manager.add_model(MaximumPositionSizeRisk(
+            max_position_percent=risk_cfg.get('max_position_percent', 0.25)
+        ))
 
         # Brokerage (primary - crypto)
         self._brokerage = self.config.get_brokerage()
@@ -526,10 +547,15 @@ class LiveTradingRunner:
         # This connects prediction system → continuous learning → automatic retraining
         logger.info("Initializing Strategic Learning Bridge...")
 
-        # Get paper brokerage (always available for learning mode)
-        paper_brokerage = self._brokerage  # TODO: Separate paper vs live brokerage
+        # Paper brokerage: always a separate PaperBrokerage for learning-mode signals.
+        # In LIVE mode, this prevents learning (sub-80% confidence) signals from
+        # routing through the real brokerage and placing real orders.
+        from src.paper_trading import PaperBrokerage
+        paper_brokerage = PaperBrokerage(
+            initial_cash=self._portfolio.initial_cash
+        )
 
-        # Get live brokerage (optional - used only in TRADING mode)
+        # Live brokerage: only the real brokerage in LIVE mode
         live_brokerage = None
         if self.mode == TradingMode.LIVE:
             live_brokerage = self._brokerage
@@ -621,6 +647,149 @@ class LiveTradingRunner:
 
         logger.info("Pre-training forex backfill complete")
 
+    def _backfill_crypto_data(self):
+        """
+        Pre-fill crypto candle data from Binance via CCXT BEFORE model training.
+
+        Fetches historical OHLCV data for all crypto symbols at all enabled
+        intervals and stores them in the database. This ensures the training
+        pipeline has sufficient data to produce accurate models.
+        """
+        # Get crypto symbols
+        crypto_symbols = {
+            s: ts for s, ts in self._symbols.items()
+            if ts.market_type == "crypto"
+        }
+        if not crypto_symbols:
+            return
+
+        logger.info("=" * 70)
+        logger.info("PRE-TRAINING: Backfilling crypto data from Binance via CCXT")
+        logger.info("=" * 70)
+
+        if self._database is None:
+            logger.error("Database not initialized — cannot backfill crypto data")
+            return
+
+        # Get backfill config
+        auto_train_cfg = self.config.raw.get('auto_training', {})
+        min_candles = auto_train_cfg.get('min_candles', 1000)
+        history_days = self.config.raw.get('data', {}).get('history_days', 365)
+
+        # Get enabled intervals from timeframe config
+        timeframe_config = self.config.raw.get('timeframes', {})
+        enabled_intervals = []
+        if timeframe_config.get('enabled', False):
+            for tf_config in timeframe_config.get('intervals', []):
+                if tf_config.get('enabled', True):
+                    interval = tf_config.get('interval')
+                    if interval:
+                        enabled_intervals.append(interval)
+        if not enabled_intervals:
+            enabled_intervals = ['1h']
+
+        import ccxt
+
+        exchange = ccxt.binance({'enableRateLimit': True})
+
+        for symbol, ts in crypto_symbols.items():
+            for interval in enabled_intervals:
+                # Check if we already have enough data
+                existing = self._database.get_candles(
+                    symbol=symbol, interval=interval, limit=min_candles + 100
+                )
+                existing_count = len(existing) if existing is not None else 0
+
+                if existing_count >= min_candles:
+                    logger.info(
+                        f"[Pre-training] {symbol} @ {interval}: "
+                        f"{existing_count} candles already in DB (sufficient)"
+                    )
+                    continue
+
+                logger.info(
+                    f"[Pre-training] {symbol} @ {interval}: "
+                    f"only {existing_count} candles, fetching {history_days} days..."
+                )
+
+                try:
+                    from datetime import timezone
+                    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    start_ms = int(
+                        (datetime.now(timezone.utc) - timedelta(days=history_days)).timestamp() * 1000
+                    )
+                    since = start_ms
+                    all_candles = []
+
+                    while since < end_ms:
+                        ohlcv = exchange.fetch_ohlcv(
+                            symbol=symbol,
+                            timeframe=interval,
+                            since=since,
+                            limit=1000,
+                        )
+                        if not ohlcv:
+                            break
+
+                        all_candles.extend(ohlcv)
+                        last_ts = ohlcv[-1][0]
+                        if last_ts <= since:
+                            break
+                        since = last_ts + 1
+
+                        if len(all_candles) % 5000 == 0:
+                            logger.info(
+                                f"  {symbol} @ {interval}: "
+                                f"fetched {len(all_candles)} candles..."
+                            )
+
+                    if not all_candles:
+                        logger.warning(f"[Pre-training] No data fetched for {symbol} @ {interval}")
+                        continue
+
+                    # Convert to DataFrame and save
+                    import pandas as _pd
+                    df = _pd.DataFrame(
+                        all_candles,
+                        columns=["timestamp", "open", "high", "low", "close", "volume"],
+                    )
+                    df["datetime"] = _pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                    df = df.drop_duplicates(subset=["timestamp"], keep="last")
+                    df = df.sort_values("timestamp").reset_index(drop=True)
+
+                    self._database.save_candles(df, symbol=symbol, interval=interval)
+                    logger.info(
+                        f"[Pre-training] {symbol} @ {interval}: "
+                        f"saved {len(df)} candles to DB "
+                        f"({df['datetime'].iloc[0]} → {df['datetime'].iloc[-1]})"
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        f"[Pre-training] Failed to backfill {symbol} @ {interval}: {e}"
+                    )
+
+        # Verify data counts
+        for symbol in crypto_symbols:
+            for interval in enabled_intervals:
+                count_df = self._database.get_candles(
+                    symbol=symbol, interval=interval, limit=min_candles + 100
+                )
+                count = len(count_df) if count_df is not None else 0
+                if count < min_candles:
+                    logger.warning(
+                        f"[Pre-training] {symbol} @ {interval}: "
+                        f"only {count} candles (need {min_candles}). "
+                        f"Training may skip this symbol."
+                    )
+                else:
+                    logger.info(
+                        f"[Pre-training] {symbol} @ {interval}: "
+                        f"{count} candles in DB (sufficient)"
+                    )
+
+        logger.info("Pre-training crypto backfill complete")
+
     def _ensure_models_ready(self):
         """
         MANDATORY: Thoroughly train models before ANY predictions.
@@ -633,11 +802,10 @@ class LiveTradingRunner:
 
         NO PREDICTIONS ALLOWED until model passes validation!
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime
         from pathlib import Path
         import gc
         import torch
-        import torch.nn as nn
         import numpy as np
         from src.analysis_engine import FeatureCalculator, LSTMModel
 
@@ -1066,7 +1234,8 @@ class LiveTradingRunner:
             learning_sys.replay_mode = True
             logger.info("Replay mode ON — trades and retraining suppressed (predictions + online updates active)")
 
-        interval_minutes = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+        from src.core.constants import INTERVAL_MINUTES
+        interval_minutes = INTERVAL_MINUTES
 
         logger.info("=" * 70)
         logger.info(f"HISTORICAL REPLAY - Learning from {replay_days} days of data")
@@ -1165,7 +1334,7 @@ class LiveTradingRunner:
                         )
 
                         # Feed to learning bridge (synchronous)
-                        result = self._learning_bridge.on_candle_close(
+                        self._learning_bridge.on_candle_close(
                             symbol=symbol,
                             interval=replay_interval,
                             candle=candle
@@ -1219,6 +1388,18 @@ class LiveTradingRunner:
         if learning_sys:
             learning_sys.replay_mode = False
             logger.info("Replay mode OFF — retraining re-enabled for live trading")
+
+        # Clean up PENDING signals from replay to prevent O(N²) accumulation
+        # max_age_hours=0 = expire ALL pending signals (replay signals should not carry into live)
+        if self._database:
+            expired = self._database.close_stale_signals(max_age_hours=0)
+            logger.info(f"Post-replay cleanup: expired {expired} pending replay signals")
+
+        # Clear open trades dict in the bridge so live trading starts clean
+        if self._learning_bridge:
+            cleared = self._learning_bridge.clear_open_trades()
+            if cleared:
+                logger.info(f"Post-replay cleanup: cleared {cleared} tracked trades from memory")
 
         logger.info("=" * 70)
         logger.info("HISTORICAL REPLAY COMPLETE")
@@ -1403,13 +1584,23 @@ class LiveTradingRunner:
         )
         self._execution_thread.start()
 
+    def _start_daily_report(self):
+        """Start the daily email report scheduler."""
+        try:
+            from src.reporting.daily_report import DailyReportScheduler
+            db_path = self.config.raw.get('database', {}).get('path', 'data/trading.db')
+            self._daily_report = DailyReportScheduler(
+                config=self.config.raw,
+                db_path=db_path,
+            )
+            self._daily_report.start()
+        except Exception as e:
+            logger.warning(f"Daily report scheduler failed to start: {e}")
+            self._daily_report = None
+
     # =========================================================================
     # DATA HANDLERS
     # =========================================================================
-
-    def _handle_tick_callback(self, tick: Tick):
-        """Callback wrapper for tick data from UnifiedDataProvider."""
-        self._handle_tick(tick.symbol, tick)
 
     def _handle_candle_callback(self, candle: Candle):
         """
@@ -1511,6 +1702,9 @@ class LiveTradingRunner:
 
         while self._running:
             try:
+                # Notify systemd watchdog that we're alive
+                self._notify_watchdog()
+
                 if self._paused:
                     time.sleep(1)
                     continue
@@ -1696,7 +1890,7 @@ class LiveTradingRunner:
             )
 
             # Submit to correct brokerage
-            ticket = brokerage.place_order(order)
+            brokerage.place_order(order)
             self._active_orders[order.id] = order
             self._total_orders += 1
 
@@ -1793,7 +1987,7 @@ class LiveTradingRunner:
     # =========================================================================
 
     def _handle_error(self, error: Exception):
-        """Handle and log errors."""
+        """Handle and log errors with distinction between transient and fatal."""
         self._errors_count += 1
 
         for callback in self._on_error:
@@ -1802,10 +1996,54 @@ class LiveTradingRunner:
             except Exception:
                 pass
 
-        # Check if critical
-        if self._errors_count > 10:
-            logger.critical("Too many errors, stopping trading")
+        # Fatal errors that should stop the bot (systemd will restart it)
+        fatal_types = (SystemExit, MemoryError, KeyboardInterrupt)
+        is_fatal = isinstance(error, fatal_types)
+
+        if is_fatal:
+            logger.critical(f"Fatal error — stopping: {error}")
             self.stop()
+            return
+
+        # Transient errors: log but don't stop.
+        # Reset counter every 100 candles worth of time (~1h40m at 1min intervals)
+        # to avoid accumulating old errors that long ago recovered.
+        if hasattr(self, '_last_error_reset'):
+            import time as _time
+            if _time.time() - self._last_error_reset > 6000:  # 100 minutes
+                self._errors_count = 1  # Reset (current error = 1)
+                self._last_error_reset = _time.time()
+        else:
+            import time as _time
+            self._last_error_reset = _time.time()
+
+        # Only stop on sustained rapid errors (10+ in a short window)
+        if self._errors_count > 10:
+            logger.critical(
+                f"Too many errors ({self._errors_count}) in error window — "
+                f"stopping (systemd will restart)"
+            )
+            self.stop()
+
+    # =========================================================================
+    # SYSTEMD WATCHDOG
+    # =========================================================================
+
+    @staticmethod
+    def _notify_watchdog():
+        """Ping systemd watchdog (no-op if not running under systemd)."""
+        notify_socket = os.environ.get('NOTIFY_SOCKET')
+        if not notify_socket:
+            return  # Not running under systemd watchdog
+        try:
+            import socket
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            if notify_socket.startswith('@'):
+                notify_socket = '\0' + notify_socket[1:]
+            sock.sendto(b'WATCHDOG=1', notify_socket)
+            sock.close()
+        except Exception:
+            pass  # Best-effort — don't crash the main loop for watchdog issues
 
     # =========================================================================
     # CALLBACKS

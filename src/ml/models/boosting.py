@@ -14,8 +14,7 @@ All models wrapped with sklearn-compatible interface.
 """
 
 import numpy as np
-import pandas as pd
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict
 from abc import ABC, abstractmethod
 import logging
 import warnings

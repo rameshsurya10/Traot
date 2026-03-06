@@ -82,6 +82,11 @@ class ContinuousLearningSystem:
         self.cl_config = self.config.get('continuous_learning', {})
         self.timeframes_config = self.config.get('timeframes', {})
 
+        # Signal strength thresholds from config
+        signals_cfg = self.config.get('signals', {})
+        self._strong_signal_threshold = signals_cfg.get('strong_signal', 0.65)
+        self._medium_signal_threshold = signals_cfg.get('medium_signal', 0.55)
+
         # Cache sequence lengths as dict for O(1) lookup (called multiple times per candle)
         self._sequence_lengths = {
             cfg['interval']: cfg.get('sequence_length', 60)
@@ -130,10 +135,17 @@ class ContinuousLearningSystem:
             logger.info("Predictor is not a neural network model, skipping continual learner")
             continual_learner = None
 
+        # Build retraining config, injecting trading_threshold so OutcomeTracker
+        # uses the same threshold for high-confidence loss detection
+        retrain_cfg = dict(self.cl_config.get('retraining', {}))
+        retrain_cfg.setdefault(
+            'high_conf_retrain_threshold',
+            conf_dict.get('trading_threshold', 0.80)
+        )
         self.outcome_tracker = OutcomeTracker(
             database=database,
             continual_learner=continual_learner,
-            config=self.cl_config.get('retraining', {})
+            config=retrain_cfg
         )
 
         # Always create a MultiTimeframeModelManager for retraining
@@ -306,7 +318,9 @@ class ContinuousLearningSystem:
             )
 
             # 6. DETERMINE MODE AND BROKERAGE
-            if can_trade_live and aggregated.confidence >= self.cl_config.get('confidence', {}).get('trading_threshold', 0.65):
+            # confidence_gate.should_trade() is the single authority for mode decision
+            # (it already checks confidence vs trading_threshold with hysteresis + regime)
+            if can_trade_live:
                 mode = 'TRADING'
                 brokerage = self.live_brokerage if self.live_brokerage else self.paper_brokerage
                 brokerage_type = 'live' if self.live_brokerage else 'paper_fallback'
@@ -325,24 +339,46 @@ class ContinuousLearningSystem:
                     reason=reason
                 )
 
-            # During replay: only predictions + online updates, no trades or evaluations
+            # During replay: execute paper trades for learning data, but skip live execution
             if self.replay_mode:
                 with self._stats_lock:
                     self._stats['predictions_made'] += 1
 
+                # Still save signals during replay so strategies can be evaluated later
+                replay_signal_id = None
+                replay_executed = False
+                entry_price = candle.close if hasattr(candle, 'close') else None
+                if aggregated.direction != 'NEUTRAL' and entry_price:
+                    try:
+                        replay_signal_id = self._execute_trade(
+                            brokerage=self.paper_brokerage,
+                            symbol=symbol,
+                            interval=primary_interval if primary_interval else interval,
+                            prediction=aggregated,
+                            is_paper=True,
+                            strategy_name=None,
+                            perf_signal_id=None,
+                            entry_price=entry_price,
+                            stop_loss=sl,
+                            take_profit=tp
+                        )
+                        replay_executed = replay_signal_id is not None
+                    except Exception as e:
+                        logger.debug(f"Replay trade save failed for {symbol}: {e}")
+
                 return {
                     'aggregated_signal': aggregated.to_dict(),
                     'mode': mode,
-                    'executed': False,
-                    'brokerage': 'replay',
+                    'executed': replay_executed,
+                    'brokerage': 'replay_paper',
                     'timeframe_signals': {
                         k: v.to_dict() for k, v in timeframe_signals.items()
                     },
                     'reason': 'replay_mode',
-                    'signal_id': None,
+                    'signal_id': replay_signal_id,
                     'strategy': None,
                     'strategy_approved': False,
-                    'entry_price': candle.close if hasattr(candle, 'close') else None
+                    'entry_price': entry_price
                 }
 
             # 7. STRATEGY EVALUATION - Check all strategies before trading
@@ -368,8 +404,9 @@ class ContinuousLearningSystem:
 
             if aggregated.direction != 'NEUTRAL':
                 # In LEARNING mode, always execute paper trades for training data
-                # In TRADING mode, only trade if strategy is recommended
-                should_execute = (mode == 'LEARNING') or (mode == 'TRADING' and strategy_approved)
+                # In TRADING mode, trade if strategy is recommended OR no strategies exist yet (fresh start)
+                no_strategies_yet = best_strategy is None
+                should_execute = (mode == 'LEARNING') or (mode == 'TRADING' and (strategy_approved or no_strategies_yet))
 
                 if should_execute:
                     # Generate perf_signal_id BEFORE executing trade
@@ -440,7 +477,6 @@ class ContinuousLearningSystem:
                         logger.debug(f"Performance learner cleanup failed: {e}")
 
             # Trade closing is handled by StrategicLearningBridge._check_and_close_trades()
-            # Calling _check_completed_trades() here would duplicate outcome recording.
 
             # Record prediction
             with self._stats_lock:
@@ -562,20 +598,14 @@ class ContinuousLearningSystem:
                     except Exception as e:
                         logger.debug(f"Boosted prediction failed for {symbol}: {e}")
 
+                from src.core.constants import blend_probabilities
                 boost_cfg = self.config.get('boosting', {})
-                boost_weight = boost_cfg.get('ensemble_weight', 0.6)
-                lstm_weight = 1.0 - boost_weight
-
                 has_lstm = lstm_prob != 0.5
-
-                if has_lstm and has_boost:
-                    combined_prob = lstm_weight * lstm_prob + boost_weight * boost_prob
-                elif has_boost:
-                    combined_prob = boost_prob
-                elif has_lstm:
-                    combined_prob = lstm_prob
-                else:
-                    combined_prob = 0.5
+                combined_prob = blend_probabilities(
+                    lstm_prob=lstm_prob, boost_prob=boost_prob,
+                    has_lstm=has_lstm, has_boost=has_boost,
+                    boost_weight=boost_cfg.get('ensemble_weight', 0.6),
+                )
 
                 # Get prediction from model
                 result = self.predictor.predict(
@@ -834,10 +864,10 @@ class ContinuousLearningSystem:
             direction_map = {'BUY': SignalType.BUY, 'SELL': SignalType.SELL}
             signal_type = direction_map.get(prediction.direction, SignalType.NEUTRAL)
 
-            # Determine strength from confidence
-            if prediction.confidence >= 0.7:
+            # Determine strength from confidence (thresholds from config signals section)
+            if prediction.confidence >= self._strong_signal_threshold:
                 strength = SignalStrength.STRONG
-            elif prediction.confidence >= 0.4:
+            elif prediction.confidence >= self._medium_signal_threshold:
                 strength = SignalStrength.MEDIUM
             else:
                 strength = SignalStrength.WEAK
@@ -856,12 +886,8 @@ class ContinuousLearningSystem:
 
             # Cooldown guard: prevent duplicate signals within half the interval period.
             # Thread-safe: entire check-and-update is atomic under _cooldown_lock.
-            _INTERVAL_MINUTES = {
-                '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
-                '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480,
-                '12h': 720, '1d': 1440
-            }
-            _candle_minutes = _INTERVAL_MINUTES.get(interval, 60)
+            from src.core.constants import INTERVAL_MINUTES
+            _candle_minutes = INTERVAL_MINUTES.get(interval, 60)
             _cooldown_minutes = max(1, math.floor(_candle_minutes / 2))  # minimum 1 min
             _cooldown_key = f"{symbol}_{interval}"
             _now = datetime.utcnow()
@@ -898,210 +924,7 @@ class ContinuousLearningSystem:
             logger.error(f"Failed to execute trade: {e}", exc_info=True)
             return None
 
-    def _check_completed_trades(
-        self,
-        symbol: str,
-        interval: str,
-        candle: any
-    ):
-        """
-        Check for completed trades and record outcomes.
-
-        Args:
-            symbol: Trading pair
-            interval: Timeframe
-            candle: Latest candle
-        """
-        try:
-            # Get pending signals for this symbol
-            pending_signals = self.database.get_pending_signals(symbol)
-
-            for pending in pending_signals:
-                # Check if trade should be closed (pending is a Signal object)
-                should_close, close_reason = self._should_close_trade(pending, candle, symbol)
-
-                if should_close:
-                    # Map signal_type back to direction string
-                    direction = pending.signal_type.value  # 'BUY', 'SELL', 'NEUTRAL'
-
-                    # Record outcome
-                    outcome = self.outcome_tracker.record_outcome(
-                        signal_id=pending.id,
-                        symbol=symbol,
-                        interval=interval,
-                        entry_price=pending.price,
-                        exit_price=candle.close,
-                        predicted_direction=direction,
-                        confidence=pending.confidence,
-                        features=np.array([]),
-                        regime='NORMAL'
-                    )
-
-                    # Mark signal as closed in the signals table
-                    outcome_label = 'WIN' if outcome['was_correct'] else 'LOSS'
-                    self.database.close_signal(
-                        signal_id=pending.id,
-                        outcome=outcome_label,
-                        exit_price=candle.close,
-                        pnl_percent=outcome['pnl_percent']
-                    )
-
-                    logger.info(
-                        f"[{symbol}] Trade closed: "
-                        f"{outcome_label} "
-                        f"({outcome['pnl_percent']:.2f}%)"
-                    )
-
-                    # PERFORMANCE-BASED LEARNING: Process outcome for per-candle feedback
-                    if self.performance_learner:
-                        try:
-                            # Derive actual_direction from price movement
-                            actual_direction = 'UP' if candle.close > pending.price else 'DOWN'
-
-                            perf_result = self.performance_learner.on_candle_closed(
-                                signal_id=f"perf_{symbol}_{interval}_{pending.id}",
-                                exit_price=candle.close,
-                                actual_direction=actual_direction
-                            )
-                            if 'action' in perf_result:
-                                logger.info(
-                                    f"[{symbol}] PerformanceLearner action: {perf_result.get('action', 'none')} "
-                                    f"outcome={perf_result.get('outcome', {}).get('was_correct', 'N/A')}"
-                                )
-                        except Exception as e:
-                            logger.warning(f"PerformanceBasedLearner.on_candle_closed failed: {e}")
-
-                    # Trigger retraining if needed
-                    if outcome['should_retrain']:
-                        self._schedule_retrain(
-                            symbol=symbol,
-                            interval=interval,
-                            reason=outcome['trigger_reason']
-                        )
-
-        except Exception as e:
-            logger.error(f"Error checking completed trades: {e}", exc_info=True)
-
-    def _should_close_trade(self, signal: Signal, candle: any, symbol: str = '') -> tuple[bool, str]:
-        """
-        Determine if a trade should be closed with proper risk management.
-
-        Exit conditions (in priority order):
-        1. Stop-loss hit (default: -2%)
-        2. Take-profit hit (default: +4% = 2:1 R:R)
-        3. Max holding period (default: 24 hours)
-        4. Opposite signal
-
-        Args:
-            signal: Pending Signal object from database
-            candle: Current candle with close price
-            symbol: Trading pair (e.g. 'BTC/USDT')
-
-        Returns:
-            (should_close: bool, reason: str)
-        """
-        from datetime import datetime, timedelta
-
-        # Get exit parameters from config (with sensible defaults)
-        exit_config = self.config.get('continuous_learning', {}).get('exit_logic', {})
-        stop_loss_pct = exit_config.get('stop_loss_pct', 2.0)
-        take_profit_pct = exit_config.get('take_profit_pct', 4.0)
-        max_holding_hours = exit_config.get('max_holding_hours', 24)
-
-        # Extract trade info from Signal object
-        entry_price = signal.price
-        if entry_price is None or entry_price <= 0:
-            logger.warning(f"Invalid entry_price for signal {signal.id}: {entry_price}")
-            return (True, "invalid_entry_price")
-
-        current_price = candle.close
-        direction = signal.signal_type.value  # 'BUY', 'SELL', 'NEUTRAL'
-
-        # Calculate P&L percentage
-        if direction == 'BUY':
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        elif direction == 'SELL':
-            pnl_pct = ((entry_price - current_price) / entry_price) * 100
-        else:
-            logger.warning(f"Unknown direction '{direction}' for signal {signal.id}")
-            return (True, "unknown_direction")
-
-        # 1. STOP-LOSS CHECK (highest priority - protect capital)
-        if pnl_pct <= -stop_loss_pct:
-            logger.info(
-                f"Stop-loss triggered for {symbol} {direction}: "
-                f"{pnl_pct:.2f}% <= -{stop_loss_pct:.2f}% "
-                f"(entry: {entry_price:.2f}, current: {current_price:.2f})"
-            )
-            return (True, "stop_loss")
-
-        # 2. TAKE-PROFIT CHECK (lock in gains)
-        if pnl_pct >= take_profit_pct:
-            logger.info(
-                f"Take-profit triggered for {symbol} {direction}: "
-                f"{pnl_pct:.2f}% >= {take_profit_pct:.2f}% "
-                f"(entry: {entry_price:.2f}, current: {current_price:.2f})"
-            )
-            return (True, "take_profit")
-
-        # 3. MAX HOLDING PERIOD CHECK (prevent stale positions)
-        try:
-            from datetime import timezone
-
-            # signal.timestamp is a datetime object
-            signal_time = signal.timestamp
-            if signal_time.tzinfo is None:
-                signal_time = signal_time.replace(tzinfo=timezone.utc)
-
-            # Current time from candle timestamp (always UTC, convert ms to seconds)
-            ts = candle.timestamp / 1000 if candle.timestamp > 1e12 else candle.timestamp
-            current_time = datetime.fromtimestamp(ts, tz=timezone.utc)
-            duration = current_time - signal_time
-
-            if duration > timedelta(hours=max_holding_hours):
-                logger.info(
-                    f"Max holding period reached for {symbol} {direction}: "
-                    f"{duration.total_seconds() / 3600:.1f}h > {max_holding_hours}h "
-                    f"(P&L: {pnl_pct:.2f}%)"
-                )
-                return (True, "max_holding_period")
-
-        except (KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse signal datetime: {e}")
-            return (True, "invalid_datetime")
-
-        # 4. OPPOSITE SIGNAL CHECK
-        # Close trade if current prediction has opposite direction with high confidence
-        opposite_signal_threshold = exit_config.get('opposite_signal_threshold', 0.70)
-
-        # Thread-safe: Copy attributes inside lock to prevent race conditions
-        with self._predictions_lock:
-            latest = self._latest_predictions.get(symbol)
-            if latest is not None:
-                latest_direction = getattr(latest, 'direction', None)
-                latest_confidence = getattr(latest, 'confidence', 0.0)
-            else:
-                latest_direction = None
-                latest_confidence = 0.0
-
-        # Check for opposite signal (outside lock, using copied values)
-        if latest_direction is not None:
-            # Determine if opposite signal
-            is_opposite = (
-                (direction == 'BUY' and latest_direction == 'SELL') or
-                (direction == 'SELL' and latest_direction == 'BUY')
-            )
-
-            if is_opposite and latest_confidence >= opposite_signal_threshold:
-                logger.info(
-                    f"Opposite signal detected for {symbol} {direction}: "
-                    f"new signal is {latest_direction} @ {latest_confidence:.2%} "
-                    f"(threshold: {opposite_signal_threshold:.2%})"
-                )
-                return (True, "opposite_signal")
-
-        # Keep position open
-        return (False, "holding")
+    # Trade closing is handled by StrategicLearningBridge._check_and_close_trades()
 
     def _schedule_retrain(
         self,

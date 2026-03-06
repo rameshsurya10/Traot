@@ -31,7 +31,6 @@ import logging
 from typing import Dict, Optional
 
 from .constants import (
-    FOREX_PAIRS,
     CurrencyPairConfig,
     LotType,
     get_pair_config,

@@ -16,7 +16,7 @@ Integrates with:
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 from datetime import datetime, timedelta
 from src.core.database import Database
 

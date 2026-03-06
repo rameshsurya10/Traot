@@ -13,16 +13,14 @@ Enhanced with:
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Callable
 import sys
 from pathlib import Path
 
 import pandas as pd
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.core.types import SignalType, SignalStrength
 from src.core.config import Config
 from src.brokerages.base import BaseBrokerage, CashBalance, Position
 from src.brokerages.orders import Order, OrderTicket, OrderType, OrderSide, OrderStatus
@@ -580,7 +578,7 @@ class BacktestEngine:
 
         This is the default mode using your existing prediction engine.
         """
-        from src.analysis_engine import AnalysisEngine, FeatureCalculator
+        from src.analysis_engine import AnalysisEngine
 
         # Load model
         analysis = AnalysisEngine(self.config._config_path or "config.yaml")

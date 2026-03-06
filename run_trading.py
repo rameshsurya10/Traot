@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Start AI Trade Bot with Continuous Learning
+Start Traot with Continuous Learning
 ============================================
 
 This script starts the LiveTradingRunner with full continuous learning enabled.
@@ -17,34 +17,71 @@ Usage:
 """
 
 import logging
+import os
+import signal
+import sys
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+logger = logging.getLogger(__name__)
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.live_trading.runner import LiveTradingRunner, TradingMode
 from src.core.config import Config
 
+# Resolve trading mode: env var TRADING_MODE overrides default
+# Valid values: paper (default), live, shadow
+_MODE_MAP = {
+    'paper': TradingMode.PAPER,
+    'shadow': TradingMode.SHADOW,
+}
+
+# SAFETY: Live trading is disabled. Remove this block when ready to go live.
+_LIVE_TRADING_ENABLED = False
+
+def _resolve_mode() -> TradingMode:
+    env_mode = os.environ.get('TRADING_MODE', 'paper').lower().strip()
+    if env_mode == 'live':
+        if not _LIVE_TRADING_ENABLED:
+            print("BLOCKED: Live trading is disabled. Set _LIVE_TRADING_ENABLED = True in run_trading.py to enable.")
+            print("Falling back to PAPER mode.")
+            return TradingMode.PAPER
+        return TradingMode.LIVE
+    mode = _MODE_MAP.get(env_mode)
+    if mode is None:
+        print(f"WARNING: Unknown TRADING_MODE='{env_mode}', falling back to PAPER")
+        return TradingMode.PAPER
+    return mode
+
 def main():
+    mode = _resolve_mode()
+
     print("="*70)
-    print("AI TRADE BOT - CONTINUOUS LEARNING MODE")
+    print(f"AI TRADE BOT - CONTINUOUS LEARNING MODE ({mode.value.upper()})")
     print("="*70)
     print()
     print("Features:")
-    print("  ✅ Automatic training on 1-year historical data")
-    print("  ✅ Continuous learning from every trade")
-    print("  ✅ Automatic retraining when accuracy drops")
-    print("  ✅ Multi-timeframe analysis (15m, 1h, 4h, 1d)")
-    print("  ✅ Strategy discovery and comparison")
-    print("  ✅ Crypto (Binance) + Forex/Metals (Twelve Data)")
+    print("  - Automatic training on 1-year historical data")
+    print("  - Continuous learning from every trade")
+    print("  - Automatic retraining when accuracy drops")
+    print("  - Multi-timeframe analysis (15m, 1h, 4h, 1d)")
+    print("  - Strategy discovery and comparison")
+    print("  - Crypto (Binance) + Forex/Metals (Twelve Data)")
+    print()
+    print(f"  Mode: {mode.value.upper()}")
+    print(f"  (Set TRADING_MODE=paper|live|shadow in .env to change)")
     print()
 
     # Initialize runner
     print("Initializing LiveTradingRunner...")
     runner = LiveTradingRunner(
         config_path="config.yaml",
-        mode=TradingMode.PAPER  # Change to LIVE when ready for real trading
+        mode=mode,
     )
 
     config = Config.load("config.yaml")
@@ -84,19 +121,37 @@ def main():
     print("="*70)
     print()
 
-    # Start trading (blocking - runs until Ctrl+C)
+    # Register signal handlers for graceful shutdown (systemd sends SIGTERM)
+    _shutdown_requested = False
+
+    def _shutdown_handler(signum, frame):
+        nonlocal _shutdown_requested
+        sig_name = signal.Signals(signum).name
+        if _shutdown_requested:
+            logger.warning(f"Second {sig_name} received — forcing exit")
+            sys.exit(1)
+        _shutdown_requested = True
+        logger.info(f"Received {sig_name} — shutting down gracefully...")
+        runner.stop()
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
+    # Start trading (blocking - runs until signal or error)
     try:
         runner.start(blocking=True)
     except KeyboardInterrupt:
-        print("\n\n" + "="*70)
-        print("Stopping...")
-        print("="*70)
+        pass  # Handled by signal handler above
+
+    if not _shutdown_requested:
+        # start() returned without a signal — likely an error exit
+        logger.info("Runner exited — stopping...")
         runner.stop()
-        print("\n✅ Stopped gracefully")
-        print()
-        print("To see what strategies were discovered, run:")
-        print("  python scripts/analyze_strategies.py")
-        print()
+
+    logger.info("Stopped gracefully")
+    print()
+    print("To see what strategies were discovered, run:")
+    print("  python scripts/analyze_strategies.py")
 
 if __name__ == "__main__":
     main()

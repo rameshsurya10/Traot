@@ -136,6 +136,18 @@ class UnbreakablePredictor:
         self.max_features = max_features
         self.device = torch.device('cuda' if use_gpu and torch.cuda.is_available() else 'cpu')
 
+        # Load regime mismatch penalties from config
+        try:
+            from src.core.config import load_config
+            raw_config = load_config(config_path)
+            pred_cfg = raw_config.get('prediction', {})
+        except Exception:
+            pred_cfg = {}
+        regime_mismatch_cfg = pred_cfg.get('regime_mismatch', {})
+        self._low_regime_conf_penalty = regime_mismatch_cfg.get('low_regime_confidence', 0.8)
+        self._bear_buy_penalty = regime_mismatch_cfg.get('bear_buy', 0.7)
+        self._bull_sell_penalty = regime_mismatch_cfg.get('bull_sell', 0.7)
+
         # Initialize components
         self.regime_detector = RegimeDetector()
         self.feature_engineer = FeatureEngineer(
@@ -186,8 +198,6 @@ class UnbreakablePredictor:
             The neural network model or None if not fitted
         """
         return self.base_models.get('tcn_lstm_attention')
-        if adaptive_features:
-            logger.info(f"Adaptive feature selection enabled (max {max_features} features)")
 
     def fit(
         self,
@@ -638,17 +648,17 @@ class UnbreakablePredictor:
         # 8. Adjust confidence based on regime
         final_confidence = model_confidence
 
-        # Reduce confidence in uncertain regimes
+        # Reduce confidence in uncertain regimes (configurable via prediction.regime_mismatch)
         if regime_confidence < 0.5:
-            final_confidence *= 0.8
+            final_confidence *= self._low_regime_conf_penalty
             warnings.append("Low regime confidence - reduced signal confidence")
 
         # Reduce confidence if regime doesn't match signal
         if regime == 'BEAR' and direction == 'BUY':
-            final_confidence *= 0.7
+            final_confidence *= self._bear_buy_penalty
             warnings.append("BUY signal in BEAR regime - use caution")
         elif regime == 'BULL' and direction == 'SELL':
-            final_confidence *= 0.7
+            final_confidence *= self._bull_sell_penalty
             warnings.append("SELL signal in BULL regime - use caution")
 
         # Get LSTM-specific probability for continuous learning

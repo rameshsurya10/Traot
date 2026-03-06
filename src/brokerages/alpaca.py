@@ -45,7 +45,6 @@ try:
         OrderSide as AlpacaSide,
         TimeInForce as AlpacaTIF,
         OrderStatus as AlpacaStatus,
-        OrderType as AlpacaOrderType
     )
     from alpaca.trading.stream import TradingStream
     ALPACA_AVAILABLE = True

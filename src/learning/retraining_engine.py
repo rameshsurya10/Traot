@@ -27,13 +27,12 @@ import threading
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, Tuple, List
+from typing import Tuple
 from datetime import datetime
-from pathlib import Path
 
 from src.core.database import Database
 from src.multi_timeframe.model_manager import MultiTimeframeModelManager
-from src.ml.learning.continual import EWC, ExperienceReplayBuffer
+from src.ml.learning.continual import EWC
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +226,7 @@ class RetrainingEngine:
                     ewc._fisher = fisher_state['fisher']
                     ewc._optimal_params = fisher_state['optimal_params']
                     ewc._is_consolidated = True
-                    logger.debug(f"Loaded existing Fisher Information")
+                    logger.debug("Loaded existing Fisher Information")
                 except Exception as e:
                     logger.warning(f"Failed to load Fisher: {e}")
 
@@ -656,8 +655,8 @@ class RetrainingEngine:
 
         # Confidence calibration params (outside loop for performance)
         pred_config = self.config.get('prediction', {})
-        floor = pred_config.get('confidence_floor', 0.52)
-        ceiling = pred_config.get('confidence_ceiling', 0.72)
+        floor = pred_config.get('confidence_floor', 0.48)
+        ceiling = pred_config.get('confidence_ceiling', 0.55)
         conf_range = ceiling - floor
 
         with torch.no_grad():

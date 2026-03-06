@@ -371,7 +371,6 @@ class Config:
         Returns:
             BaseBrokerage instance based on config
         """
-        from src.brokerages.base import BaseBrokerage
 
         if self.brokerage.type == "paper":
             from src.paper_trading import PaperBrokerage

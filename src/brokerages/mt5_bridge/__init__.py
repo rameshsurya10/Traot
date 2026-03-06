@@ -2,10 +2,10 @@
 MT5 Bridge - Cross-Platform MetaTrader 5 Access
 ================================================
 
-Allows running the AI Trade Bot on Linux while the MT5 terminal runs on Windows.
+Allows running the Traot on Linux while the MT5 terminal runs on Windows.
 
 Architecture:
-    [Linux: AI Trade Bot]  <--TCP-->  [Windows: MT5 Bridge Server]
+    [Linux: Traot]  <--TCP-->  [Windows: MT5 Bridge Server]
          MT5BridgeClient                    MT5BridgeServer
 
 Components:

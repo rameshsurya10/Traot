@@ -19,7 +19,6 @@ Centralized model management
 import logging
 import threading
 import torch
-import torch.nn as nn
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass

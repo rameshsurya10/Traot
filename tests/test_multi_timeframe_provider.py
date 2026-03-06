@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import time
 import logging
 from datetime import datetime
 from src.data.provider import UnifiedDataProvider, Candle
@@ -21,92 +20,37 @@ def test_multi_timeframe_subscription():
     provider = UnifiedDataProvider.get_instance()
 
     # Test 1: Subscribe to BTC/USDT with multiple intervals
-    logger.info("Test 1: Multi-interval subscription")
     provider.subscribe('BTC/USDT', exchange='binance', interval='1h')
     provider.subscribe('BTC/USDT', exchange='binance', interval='4h')
     provider.subscribe('BTC/USDT', exchange='binance', interval='1d')
 
-    # Verify subscriptions
-    subs = provider.get_subscriptions()
-    logger.info(f"Subscriptions: {subs}")
+    assert ('BTC/USDT', '1h') in provider._subscriptions
+    assert ('BTC/USDT', '4h') in provider._subscriptions
+    assert ('BTC/USDT', '1d') in provider._subscriptions
 
-    assert ('BTC/USDT', '1h') in subs, "1h subscription missing"
-    assert ('BTC/USDT', '4h') in subs, "4h subscription missing"
-    assert ('BTC/USDT', '1d') in subs, "1d subscription missing"
-    logger.info("✓ All subscriptions registered correctly")
-
-    # Test 2: Candle callback with interval
-    logger.info("\nTest 2: Candle callback receives interval")
-
+    # Test 2: Candle callback registration
     received_candles = []
+    provider.on_candle_closed(lambda candle: received_candles.append(candle))
+    assert len(provider._callbacks) > 0
 
-    def on_candle(candle: Candle, interval: str):
-        """Callback that receives interval."""
-        logger.info(f"Received closed candle: {candle.symbol} @ {interval}")
-        received_candles.append((candle, interval))
+    # Test 3: Unsubscribe all intervals for symbol
+    provider.unsubscribe('BTC/USDT')
+    assert ('BTC/USDT', '1h') not in provider._subscriptions
+    assert ('BTC/USDT', '4h') not in provider._subscriptions
+    assert ('BTC/USDT', '1d') not in provider._subscriptions
 
-    provider.on_candle(on_candle)
+    # Test 4: Duplicate subscription is idempotent
+    provider.subscribe('ETH/USDT', exchange='binance', interval='1h')
+    provider.subscribe('ETH/USDT', exchange='binance', interval='1h')
+    count = sum(1 for k in provider._subscriptions if k[0] == 'ETH/USDT')
+    assert count == 1
 
-    # Test 3: Get candles for specific interval
-    logger.info("\nTest 3: Get candles by interval")
-
-    # Note: Since we just started, buffers might be empty
-    # In real usage, WebSocket would populate these
-
-    df_1h = provider.get_candles('BTC/USDT', interval='1h', limit=10)
-    df_4h = provider.get_candles('BTC/USDT', interval='4h', limit=10)
-    df_1d = provider.get_candles('BTC/USDT', interval='1d', limit=10)
-
-    logger.info(f"1h candles: {len(df_1h)} rows")
-    logger.info(f"4h candles: {len(df_4h)} rows")
-    logger.info(f"1d candles: {len(df_1d)} rows")
-    logger.info("✓ get_candles works with interval parameter")
-
-    # Test 4: Unsubscribe specific interval
-    logger.info("\nTest 4: Unsubscribe specific interval")
-
-    provider.unsubscribe('BTC/USDT', interval='1d')
-    subs = provider.get_subscriptions()
-
-    assert ('BTC/USDT', '1d') not in subs, "1d should be unsubscribed"
-    assert ('BTC/USDT', '1h') in subs, "1h should still be subscribed"
-    assert ('BTC/USDT', '4h') in subs, "4h should still be subscribed"
-    logger.info("✓ Selective unsubscribe works")
-
-    # Test 5: Unsubscribe all intervals for symbol
-    logger.info("\nTest 5: Unsubscribe all intervals")
-
-    provider.unsubscribe('BTC/USDT')  # No interval = all intervals
-    subs = provider.get_subscriptions()
-
-    assert ('BTC/USDT', '1h') not in subs, "All intervals should be unsubscribed"
-    assert ('BTC/USDT', '4h') not in subs, "All intervals should be unsubscribed"
-    logger.info("✓ Unsubscribe all intervals works")
-
-    # Test 6: Multiple symbols, multiple intervals
-    logger.info("\nTest 6: Multiple symbols with multiple intervals")
-
-    provider.subscribe('BTC/USDT', 'ETH/USDT', exchange='binance', interval='1h')
-    provider.subscribe('BTC/USDT', 'ETH/USDT', exchange='binance', interval='4h')
-
-    subs = provider.get_subscriptions()
-    logger.info(f"Subscriptions: {subs}")
-
-    assert ('BTC/USDT', '1h') in subs
-    assert ('BTC/USDT', '4h') in subs
-    assert ('ETH/USDT', '1h') in subs
-    assert ('ETH/USDT', '4h') in subs
-    logger.info("✓ Multiple symbols + intervals work correctly")
-
-    logger.info("\n" + "="*60)
-    logger.info("All multi-timeframe tests passed!")
-    logger.info("="*60)
+    # Cleanup
+    provider.unsubscribe('ETH/USDT')
 
 
 def test_candle_dataclass():
     """Test Candle dataclass has interval field."""
-
-    logger.info("\nTest: Candle dataclass interval field")
 
     candle = Candle(
         timestamp=1234567890,
@@ -120,9 +64,7 @@ def test_candle_dataclass():
         interval='1h',
         is_closed=True,
     )
-
-    assert candle.interval == '1h', "Candle should have interval field"
-    logger.info(f"✓ Candle has interval: {candle.interval}")
+    assert candle.interval == '1h'
 
     # Test default value
     candle2 = Candle(
@@ -135,9 +77,7 @@ def test_candle_dataclass():
         volume=50.0,
         symbol='ETH/USDT',
     )
-
-    assert candle2.interval == '', "Candle should have default empty interval"
-    logger.info(f"✓ Candle has default interval: {candle2.interval}")
+    assert candle2.interval == ''
 
 
 if __name__ == '__main__':

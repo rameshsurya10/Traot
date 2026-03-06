@@ -1,0 +1,58 @@
+# =============================================================================
+# Traot — systemd Service File (Hostinger VPS)
+# =============================================================================
+# Install:
+#   cp scripts/ai-trade-bot.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable ai-trade-bot    # auto-start on boot
+#   systemctl start ai-trade-bot     # start now
+#
+# Commands:
+#   systemctl status ai-trade-bot    # check status
+#   journalctl -u ai-trade-bot -f    # follow live logs
+#   systemctl restart ai-trade-bot   # restart
+#   systemctl stop ai-trade-bot      # stop
+# =============================================================================
+
+[Unit]
+Description=Traot - Continuous Learning Trading System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# --- Process ---
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/ai-trade-bot
+
+# --- Startup ---
+ExecStart=/root/ai-trade-bot/venv/bin/python3 run_trading.py
+
+# --- Environment ---
+EnvironmentFile=/root/ai-trade-bot/.env
+
+# --- Graceful shutdown ---
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# --- Auto-restart on failure ---
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- Watchdog ---
+WatchdogSec=300
+
+# --- Resource limits ---
+MemoryMax=3G
+MemoryHigh=2G
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-trade-bot
+
+[Install]
+WantedBy=multi-user.target

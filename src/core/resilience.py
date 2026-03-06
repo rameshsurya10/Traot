@@ -574,7 +574,7 @@ class ReconnectionManager:
                 if datetime.utcnow() - start_time > max_duration:
                     logger.error(f"Max reconnection duration exceeded for {name}")
                     if conn['on_failed']:
-                        conn['on_failed'](f"Max duration (1 hour) exceeded")
+                        conn['on_failed']("Max duration (1 hour) exceeded")
                     return False
 
                 # Check max attempts

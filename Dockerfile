@@ -1,4 +1,4 @@
-# AI Trade Bot - Docker Image
+# Traot - Docker Image
 # ===========================
 #
 # Build: docker build -t ai-trade-bot .

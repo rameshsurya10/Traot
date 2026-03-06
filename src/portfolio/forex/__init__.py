@@ -2,7 +2,7 @@
 Forex Trading Module
 ====================
 
-Comprehensive Forex trading support for the AI Trade Bot.
+Comprehensive Forex trading support for the Traot.
 
 This module provides:
 - Currency pair configurations and constants

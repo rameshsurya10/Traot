@@ -46,11 +46,8 @@ from .pip_calculator import PipCalculator
 from .leverage_manager import LeverageManager
 from .spread_tracker import SpreadTracker
 from .constants import (
-    FOREX_PAIRS,
     LotType,
     US_MAX_LEVERAGE,
-    get_pair_config,
-    is_forex_pair,
 )
 
 logger = logging.getLogger(__name__)

@@ -276,7 +276,6 @@ class OrderValidator:
         result: OrderValidationResult
     ):
         """Validate position size limits."""
-        symbol = order.get('symbol', '')
         quantity = order.get('quantity', 0)
         price = order.get('price', 0) or order.get('current_price', 0)
 

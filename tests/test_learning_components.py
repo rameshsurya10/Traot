@@ -268,14 +268,15 @@ def test_outcome_tracker_basic():
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
     db = Database(temp_file.name)
 
-    config = {
-        'retraining': {
-            'on_loss': True,
-            'consecutive_loss_threshold': 3,
-            'win_rate_threshold': 0.45
-        }
+    # OutcomeTracker expects the retraining section directly as config,
+    # and config must be passed as keyword arg (2nd positional is continual_learner)
+    retrain_config = {
+        'on_loss': True,
+        'consecutive_loss_threshold': 3,
+        'win_rate_threshold': 0.45,
+        'high_conf_retrain_threshold': 0.80,
     }
-    tracker = OutcomeTracker(db, config)
+    tracker = OutcomeTracker(db, config=retrain_config)
 
     # Create a test signal first
     from src.core.types import Signal, SignalType, SignalStrength
