@@ -204,6 +204,144 @@ else
     echo "      Swap already exists."
 fi
 
+# ------------------------------------------------------------------
+# Step 8: Anti-Mining / Anti-Malware Protection
+# ------------------------------------------------------------------
+echo "[8/10] Installing anti-mining protection..."
+
+# Block known mining pool domains via /etc/hosts
+MINING_BLOCKED=0
+MINING_DOMAINS=(
+    "pool.minergate.com"
+    "xmr.pool.minergate.com"
+    "stratum.antpool.com"
+    "xmr-eu1.nanopool.org"
+    "xmr-eu2.nanopool.org"
+    "xmr-us-east1.nanopool.org"
+    "xmr-us-west1.nanopool.org"
+    "xmr-asia1.nanopool.org"
+    "pool.supportxmr.com"
+    "mine.c3pool.com"
+    "xmr.2miners.com"
+    "pool.hashvault.pro"
+    "gulf.moneroocean.stream"
+    "pool.minexmr.com"
+    "monerohash.com"
+    "stratum+tcp://xmr.pool.minergate.com"
+    "coinhive.com"
+    "authedmine.com"
+    "crypto-loot.com"
+    "coin-hive.com"
+    "ppxxmr.com"
+    "minergate.com"
+    "miningrigrentals.com"
+    "nicehash.com"
+    "unmineable.com"
+    "herominers.com"
+    "kryptex.com"
+    "pool.woolypooly.com"
+)
+
+for domain in "${MINING_DOMAINS[@]}"; do
+    if ! grep -q "$domain" /etc/hosts 2>/dev/null; then
+        echo "0.0.0.0 $domain" >> /etc/hosts
+        MINING_BLOCKED=$((MINING_BLOCKED + 1))
+    fi
+done
+echo "      Blocked ${MINING_BLOCKED} mining pool domains in /etc/hosts."
+
+# Block common mining ports via UFW (outbound)
+for port in 3333 4444 5555 7777 8888 9999 14433 14444 45560 45700; do
+    ufw deny out "$port" > /dev/null 2>&1
+done
+echo "      Blocked mining stratum ports (3333,4444,5555,7777,8888,9999,etc) outbound."
+
+# Kill any existing mining processes (common miner names)
+MINERS_KILLED=0
+for miner_name in xmrig xmr-stak minerd cpuminer cgminer bfgminer ethminer nbminer t-rex gminer lolminer; do
+    if pgrep -x "$miner_name" > /dev/null 2>&1; then
+        pkill -9 "$miner_name" 2>/dev/null
+        MINERS_KILLED=$((MINERS_KILLED + 1))
+        echo "      KILLED running miner: $miner_name"
+    fi
+done
+if [ "$MINERS_KILLED" -eq 0 ]; then
+    echo "      No mining processes found (clean system)."
+fi
+
+# Remove common miner binaries if they exist
+for miner_path in /tmp/xmrig /tmp/.xmrig /var/tmp/xmrig /dev/shm/xmrig /tmp/kdevtmpfsi /tmp/kinsing; do
+    if [ -f "$miner_path" ] || [ -d "$miner_path" ]; then
+        rm -rf "$miner_path"
+        echo "      REMOVED miner binary: $miner_path"
+    fi
+done
+
+echo "      Anti-mining protection active."
+
+# ------------------------------------------------------------------
+# Step 9: Rootkit detection + integrity monitoring
+# ------------------------------------------------------------------
+echo "[9/10] Installing rootkit detection..."
+apt-get install -y -qq rkhunter chkrootkit > /dev/null 2>&1
+
+# Update rkhunter database
+rkhunter --update > /dev/null 2>&1 || true
+rkhunter --propupd > /dev/null 2>&1 || true
+echo "      rkhunter + chkrootkit installed."
+echo "      Run manually: rkhunter --check --sk"
+echo "      Run manually: chkrootkit"
+
+# ------------------------------------------------------------------
+# Step 10: CPU monitoring cron job (detect mining)
+# ------------------------------------------------------------------
+echo "[10/10] Setting up CPU monitoring watchdog..."
+
+cat > /root/mining_watchdog.sh << 'WATCHEOF'
+#!/bin/bash
+# Mining Watchdog — kills processes using >80% CPU for extended periods
+# Runs every 5 minutes via cron
+
+LOG="/var/log/mining_watchdog.log"
+THRESHOLD=80
+WHITELIST="python3|python|pip|apt|dpkg|journalctl|systemd"
+
+# Find processes using more than threshold CPU (exclude whitelisted)
+HIGH_CPU=$(ps aux --sort=-%cpu | awk -v threshold="$THRESHOLD" 'NR>1 && $3>threshold {print $2, $11, $3}' | grep -vE "$WHITELIST" | head -5)
+
+if [ -n "$HIGH_CPU" ]; then
+    echo "$(date): HIGH CPU detected:" >> "$LOG"
+    echo "$HIGH_CPU" >> "$LOG"
+
+    # Check if process name matches known miners
+    echo "$HIGH_CPU" | while read pid cmd cpu; do
+        cmd_lower=$(echo "$cmd" | tr '[:upper:]' '[:lower:]')
+        case "$cmd_lower" in
+            *xmrig*|*minerd*|*cpuminer*|*cgminer*|*kdevtmpfsi*|*kinsing*|*xmr*|*stratum*)
+                echo "$(date): KILLING miner process: PID=$pid CMD=$cmd CPU=$cpu%" >> "$LOG"
+                kill -9 "$pid" 2>/dev/null
+                ;;
+            *)
+                echo "$(date): WARNING: Unknown high CPU process: PID=$pid CMD=$cmd CPU=$cpu% (not killed)" >> "$LOG"
+                ;;
+        esac
+    done
+fi
+WATCHEOF
+
+chmod 700 /root/mining_watchdog.sh
+
+# Install cron job (every 5 minutes)
+CRON_LINE="*/5 * * * * /root/mining_watchdog.sh"
+if ! crontab -l 2>/dev/null | grep -q "mining_watchdog"; then
+    (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+    echo "      CPU watchdog cron installed (checks every 5 minutes)."
+else
+    echo "      CPU watchdog cron already installed."
+fi
+echo "      Auto-kills known miners using >80% CPU."
+echo "      Log: /var/log/mining_watchdog.log"
+
 echo ""
 echo "=========================================="
 echo "  Security Hardening Complete!"
@@ -217,6 +355,10 @@ echo "  [DONE] Fail2Ban: 3 failed SSH = 2 hour IP ban"
 echo "  [DONE] Unused services disabled"
 echo "  [DONE] File permissions locked down (.env, db, models)"
 echo "  [DONE] 2GB swap prevents out-of-memory crashes"
+echo "  [DONE] Mining pool domains blocked (28+ domains)"
+echo "  [DONE] Mining stratum ports blocked outbound"
+echo "  [DONE] Rootkit detection installed (rkhunter + chkrootkit)"
+echo "  [DONE] CPU watchdog: auto-kills miners every 5 minutes"
 echo ""
 echo "  IMPORTANT remaining steps:"
 echo "  1. Test SSH login still works (open new terminal, try ssh root@IP)"
@@ -224,9 +366,10 @@ echo "  2. If SSH key login works, uncomment PasswordAuthentication=no"
 echo "     in /etc/ssh/sshd_config for maximum security"
 echo "  3. Consider changing SSH port (optional, edit ufw + sshd_config)"
 echo ""
-echo "  To check Fail2Ban status:"
-echo "    fail2ban-client status sshd"
-echo ""
-echo "  To check firewall status:"
-echo "    ufw status verbose"
+echo "  Security commands:"
+echo "    fail2ban-client status sshd       # Check banned IPs"
+echo "    ufw status verbose                # Firewall rules"
+echo "    rkhunter --check --sk             # Rootkit scan"
+echo "    chkrootkit                        # Second rootkit scan"
+echo "    cat /var/log/mining_watchdog.log  # Mining detection log"
 echo ""
