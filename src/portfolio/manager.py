@@ -252,6 +252,10 @@ class PortfolioManager:
 
         logger.info(f"PortfolioManager initialized with ${initial_cash:,.2f}")
 
+    @property
+    def initial_cash(self) -> float:
+        return self._initial_value
+
     # =========================================================================
     # CASH MANAGEMENT
     # =========================================================================
