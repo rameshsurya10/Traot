@@ -21,6 +21,7 @@ from typing import Dict, List
 import joblib
 import numpy as np
 import pandas as pd
+import pandas_ta as ta  # noqa: F401 — registers df.ta accessor
 
 logger = logging.getLogger(__name__)
 
