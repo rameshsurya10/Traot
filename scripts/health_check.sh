@@ -32,15 +32,29 @@ echo "  Memory: $(free -h | awk '/Mem:/ {print $3 "/" $2}')"
 echo "  Disk:   $(df -h / | awk 'NR==2 {print $3 "/" $2 " (" $5 " used)"}')"
 echo ""
 
-# 2. systemd service status
+# 2. Service status (pm2 or systemd)
 echo "[Service]"
-if systemctl is-active --quiet ai-trade-bot 2>/dev/null; then
+if command -v pm2 &>/dev/null && pm2 list 2>/dev/null | grep -q "Traot"; then
+    PM2_STATUS=$(pm2 list 2>/dev/null | grep "Traot" | awk '{print $18}')
+    PM2_UPTIME=$(pm2 list 2>/dev/null | grep "Traot" | awk '{print $14}')
+    PM2_MEM=$(pm2 list 2>/dev/null | grep "Traot" | awk '{print $20, $21}')
+    PM2_CPU=$(pm2 list 2>/dev/null | grep "Traot" | awk '{print $16, $17}')
+    if pm2 list 2>/dev/null | grep "Traot" | grep -q "online"; then
+        echo "  Status:  RUNNING (pm2)"
+        echo "  Uptime:  ${PM2_UPTIME}"
+        echo "  Memory:  ${PM2_MEM}"
+        echo "  CPU:     ${PM2_CPU}"
+    else
+        echo "  Status:  NOT RUNNING"
+        echo "  Run:     pm2 start run_trading.py --name Traot --interpreter /root/Traot/venv/bin/python3 --cwd /root/Traot"
+    fi
+elif systemctl is-active --quiet ai-trade-bot 2>/dev/null; then
     UPTIME=$(systemctl show ai-trade-bot --property=ActiveEnterTimestamp | cut -d= -f2)
-    echo "  Status:  RUNNING"
+    echo "  Status:  RUNNING (systemd)"
     echo "  Since:   ${UPTIME}"
 else
     echo "  Status:  NOT RUNNING"
-    echo "  Run:     systemctl start ai-trade-bot"
+    echo "  Run:     pm2 start run_trading.py --name Traot --interpreter /root/Traot/venv/bin/python3 --cwd /root/Traot"
 fi
 
 # 3. Database stats
@@ -97,7 +111,15 @@ done
 # 5. Recent log errors
 echo ""
 echo "[Recent Errors (last 30 min)]"
-if command -v journalctl &>/dev/null; then
+if command -v pm2 &>/dev/null && pm2 list 2>/dev/null | grep -q "Traot"; then
+    ERRORS=$(pm2 logs Traot --lines 200 --nostream 2>/dev/null | grep -i "error\|exception\|failed\|traceback" | wc -l)
+    if [ "$ERRORS" -eq 0 ]; then
+        echo "  None — clean run"
+    else
+        echo "  ${ERRORS} error lines found:"
+        pm2 logs Traot --lines 200 --nostream 2>/dev/null | grep -i "error\|exception\|failed" | tail -5 | sed 's/^/  /'
+    fi
+elif command -v journalctl &>/dev/null; then
     ERRORS=$(journalctl -u ai-trade-bot --since "30 minutes ago" 2>/dev/null | grep -i "error\|exception\|failed\|traceback" | wc -l)
     if [ "$ERRORS" -eq 0 ]; then
         echo "  None — clean run"
@@ -106,7 +128,7 @@ if command -v journalctl &>/dev/null; then
         journalctl -u ai-trade-bot --since "30 minutes ago" 2>/dev/null | grep -i "error\|exception\|failed" | tail -5 | sed 's/^/  /'
     fi
 else
-    echo "  journalctl not available — check logs manually"
+    echo "  No log source available — check: pm2 logs Traot"
 fi
 
 # 6. Success criteria
