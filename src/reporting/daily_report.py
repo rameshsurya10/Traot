@@ -32,18 +32,22 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.platypus import (
-    HRFlowable,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        HRFlowable,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+    _REPORTLAB_AVAILABLE = True
+except ImportError:
+    _REPORTLAB_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +137,6 @@ class DailyReportScheduler:
             commentary = self._generate_commentary(data, date_str)
             html = self._build_html(data, commentary, date_str)
             text = self._build_plain_text(data, commentary, date_str)
-            pdf_bytes = self._build_pdf(data, commentary, date_str)
-
             subject = f"{APP_NAME} — Daily Report {date_str}"
 
             msg = MIMEMultipart('mixed')
@@ -147,14 +149,18 @@ class DailyReportScheduler:
             body.attach(MIMEText(html, 'html', 'utf-8'))
             msg.attach(body)
 
-            pdf_part = MIMEBase('application', 'pdf')
-            pdf_part.set_payload(pdf_bytes)
-            encoders.encode_base64(pdf_part)
-            pdf_part.add_header(
-                'Content-Disposition',
-                f'attachment; filename="traot_report_{date_str}.pdf"',
-            )
-            msg.attach(pdf_part)
+            if _REPORTLAB_AVAILABLE:
+                pdf_bytes = self._build_pdf(data, commentary, date_str)
+                pdf_part = MIMEBase('application', 'pdf')
+                pdf_part.set_payload(pdf_bytes)
+                encoders.encode_base64(pdf_part)
+                pdf_part.add_header(
+                    'Content-Disposition',
+                    f'attachment; filename="traot_report_{date_str}.pdf"',
+                )
+                msg.attach(pdf_part)
+            else:
+                logger.info("reportlab not installed — sending HTML-only email (no PDF)")
 
             with smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30) as server:
                 server.ehlo()

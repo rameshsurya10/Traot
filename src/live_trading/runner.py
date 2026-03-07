@@ -1931,10 +1931,11 @@ class LiveTradingRunner:
             pip_calc = PipCalculator()
 
             # Calculate stop distance in pips
-            stop_pips = pip_calc.price_to_pips(
+            stop_pips = abs(pip_calc.price_to_pips(
                 signal.symbol,
-                abs(signal.entry_price - signal.stop_loss)
-            )
+                signal.entry_price,
+                signal.stop_loss
+            ))
             if stop_pips <= 0:
                 stop_pips = 50  # Fallback: 50 pip stop
 
