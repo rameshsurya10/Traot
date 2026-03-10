@@ -127,7 +127,7 @@ news:
     min_articles: 1
 currencies: null
 prediction:
-  confidence_floor: 0.48
+  confidence_floor: 0.50
   confidence_ceiling: 0.55
   regime_penalties:
     TRENDING: 1.0

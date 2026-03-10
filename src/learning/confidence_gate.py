@@ -141,6 +141,10 @@ class ConfidenceGate:
         """
         self._stats['total_checks'] += 1
 
+        # Hard minimum confidence floor — reject noise signals immediately
+        if confidence < self.config.min_threshold_clamp:
+            return (False, f"Confidence {confidence:.1%} below minimum floor {self.config.min_threshold_clamp:.1%}")
+
         # Apply smoothing if symbol/interval provided
         if symbol and interval:
             confidence = self._apply_smoothing(confidence, symbol, interval)
