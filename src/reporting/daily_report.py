@@ -512,7 +512,12 @@ class DailyReportScheduler:
         trade_rows = ''
         display_trades = trade_list[:15]
         for tr in display_trades:
-            entry_t = (tr['entry_time'] or '')[-8:]
+            _raw_et = tr['entry_time'] or ''
+            try:
+                entry_t = datetime.fromisoformat(_raw_et).strftime('%H:%M:%S')
+            except Exception:
+                entry_t = _raw_et[-8:] if len(_raw_et) >= 8 else _raw_et
+            tf_str = str(tr.get('interval') or '')
             result = 'WIN' if tr['was_correct'] == 1 else ('LOSS' if tr['was_correct'] == 0 else 'OPEN')
             r_color = '#16a34a' if result == 'WIN' else ('#dc2626' if result == 'LOSS' else '#6b7280')
             pnl_str = f"{tr['pnl_percent']:+.3f}%" if tr['pnl_percent'] is not None else '—'
@@ -523,6 +528,7 @@ class DailyReportScheduler:
             trade_rows += (
                 f'<tr>'
                 f'<td style="{TD};color:#6b7280;font-size:12px">{esc(entry_t)}</td>'
+                f'<td style="{TD};color:#6b7280;font-size:12px;text-align:center">{esc(tf_str)}</td>'
                 f'<td style="{TD};font-weight:600">{esc(str(tr["symbol"] or ""))}</td>'
                 f'<td style="{TD};text-align:center">{esc(str(tr["predicted_direction"] or ""))}</td>'
                 f'<td style="{TD};text-align:right">{ep}</td>'
@@ -533,7 +539,7 @@ class DailyReportScheduler:
                 f'</tr>'
             )
         if not trade_list:
-            trade_rows = EMPTY.format(cols=8, msg='No trades today.')
+            trade_rows = EMPTY.format(cols=9, msg='No trades today.')
         extra_note = ''
         if len(trade_list) > 15:
             extra_note = f'<p style="color:#6b7280;font-size:12px;margin:8px 0 0;text-align:center">Showing 15 of {len(trade_list)} trades. Full list in PDF attachment.</p>'
@@ -655,7 +661,7 @@ class DailyReportScheduler:
     <h2 style="{HEADING}">5. Trade Log</h2>
     <table style="width:100%;border-collapse:collapse">
       <tr style="border-bottom:2px solid #e5e7eb">
-        <th style="{TH}">Time</th><th style="{TH}">Symbol</th>
+        <th style="{TH}">Time</th><th style="{TH};text-align:center">TF</th><th style="{TH}">Symbol</th>
         <th style="{TH};text-align:center">Dir</th><th style="{TH};text-align:right">Entry</th>
         <th style="{TH};text-align:right">Exit</th><th style="{TH};text-align:right">P&amp;L</th>
         <th style="{TH};text-align:center">Conf</th><th style="{TH};text-align:center">Result</th>
@@ -919,19 +925,25 @@ class DailyReportScheduler:
         # 5. Trade Log (full list in PDF)
         elements.append(Paragraph("5. Trade Log", h2_s))
         if data['trade_list']:
-            t_header = ['Time', 'Symbol', 'Dir', 'Entry', 'Exit', 'P&L%', 'Conf', 'Result']
+            t_header = ['Time', 'TF', 'Symbol', 'Dir', 'Entry', 'Exit', 'P&L%', 'Conf', 'Result']
             t_rows = []
             for tr in data['trade_list']:
-                entry_t = (tr['entry_time'] or '')[-8:]
+                _raw_et = tr['entry_time'] or ''
+                try:
+                    entry_t = datetime.fromisoformat(_raw_et).strftime('%H:%M:%S')
+                except Exception:
+                    entry_t = _raw_et[-8:] if len(_raw_et) >= 8 else _raw_et
+                tf_s = str(tr.get('interval') or '')
                 result = 'WIN' if tr['was_correct'] == 1 else ('LOSS' if tr['was_correct'] == 0 else 'OPEN')
                 pnl_s = f"{tr['pnl_percent']:+.3f}" if tr['pnl_percent'] is not None else '-'
                 conf_s = f"{tr['predicted_confidence']:.0%}" if tr['predicted_confidence'] else '-'
                 ep = f"{tr['entry_price']:.2f}" if tr['entry_price'] else '-'
                 xp = f"{tr['exit_price']:.2f}" if tr['exit_price'] else '-'
-                t_rows.append([entry_t, str(tr['symbol'] or ''), str(tr['predicted_direction'] or ''),
+                t_rows.append([entry_t, tf_s, str(tr['symbol'] or ''), str(tr['predicted_direction'] or ''),
                                ep, xp, pnl_s, conf_s, result])
 
-            tbl = Table([t_header] + t_rows, colWidths=[50, 62, 32, 52, 52, 42, 38, 36])
+            # colWidths: Time, TF, Symbol, Dir, Entry, Exit, P&L%, Conf, Result
+            tbl = Table([t_header] + t_rows, colWidths=[46, 26, 56, 28, 48, 48, 40, 34, 34])
             t_style = [
                 ('BACKGROUND', (0, 0), (-1, 0), HEADER_BG),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
@@ -941,18 +953,19 @@ class DailyReportScheduler:
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, LIGHT_BG]),
                 ('TOPPADDING', (0, 0), (-1, -1), 3),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                ('ALIGN', (3, 0), (6, -1), 'RIGHT'),
-                ('ALIGN', (7, 0), (7, -1), 'CENTER'),
+                ('ALIGN', (1, 0), (1, -1), 'CENTER'),   # TF col centred
+                ('ALIGN', (4, 0), (7, -1), 'RIGHT'),    # Entry/Exit/P&L%/Conf right-aligned
+                ('ALIGN', (8, 0), (8, -1), 'CENTER'),   # Result centred
             ]
             # Color WIN/LOSS/P&L
             for i, tr in enumerate(data['trade_list'], start=1):
                 if tr['was_correct'] == 1:
-                    t_style.append(('TEXTCOLOR', (7, i), (7, i), GREEN))
+                    t_style.append(('TEXTCOLOR', (8, i), (8, i), GREEN))
                 elif tr['was_correct'] == 0:
-                    t_style.append(('TEXTCOLOR', (7, i), (7, i), RED))
+                    t_style.append(('TEXTCOLOR', (8, i), (8, i), RED))
                 if tr['pnl_percent'] is not None:
                     pc = GREEN if tr['pnl_percent'] >= 0 else RED
-                    t_style.append(('TEXTCOLOR', (5, i), (5, i), pc))
+                    t_style.append(('TEXTCOLOR', (6, i), (6, i), pc))
             tbl.setStyle(TableStyle(t_style))
             elements.append(tbl)
         else:
