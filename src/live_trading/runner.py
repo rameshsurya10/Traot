@@ -1663,6 +1663,18 @@ class LiveTradingRunner:
 
         if self._learning_bridge:
             try:
+                # LIVE CANDLE STALENESS CHECK
+                # Reject candles older than 4 hours — historical/backfill candles must
+                # NEVER open or close real trades. Only fresh live candles are allowed.
+                candle_ts_sec = candle.timestamp / 1000 if candle.timestamp > 1e12 else candle.timestamp
+                candle_age_hours = (time.time() - candle_ts_sec) / 3600
+                if candle_age_hours > 4:
+                    logger.debug(
+                        f"[{symbol}] Skipping stale candle from live handler "
+                        f"(age={candle_age_hours:.1f}h > 4h). Historical data is for training only."
+                    )
+                    return
+
                 # Get the interval from the candle itself (set by provider)
                 ts = self._symbols.get(symbol)
                 if ts:

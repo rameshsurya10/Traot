@@ -247,7 +247,10 @@ class StrategicLearningBridge:
                     self._current_modes[symbol] = new_mode
 
             # 4. TRACK TRADE IF EXECUTED
-            if result.get('executed') and result.get('signal_id'):
+            # Skip during replay — historical candles must NEVER open/close real trades.
+            # Replay is pre-workout for the model only; only live candles create real trades.
+            is_replay = result.get('reason') == 'replay_mode'
+            if not is_replay and result.get('executed') and result.get('signal_id'):
                 # Merge entry_price into prediction dict for trade tracking
                 prediction_dict = result['aggregated_signal']
                 if result.get('entry_price'):
@@ -261,7 +264,9 @@ class StrategicLearningBridge:
                 )
 
             # 5. CHECK FOR COMPLETED TRADES
-            self._check_and_close_trades(symbol, candle)
+            # Skip during replay — exit prices from historical candles are not real live prices.
+            if not is_replay:
+                self._check_and_close_trades(symbol, candle)
 
             # Log result
             if result.get('executed'):
