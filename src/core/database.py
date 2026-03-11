@@ -578,7 +578,9 @@ class Database:
         self,
         symbol: str,
         interval: str,
-        limit: int = 500
+        limit: int = 500,
+        live_only: bool = False,
+        live_days: int = 7
     ) -> pd.DataFrame:
         """
         Get recent candles from database.
@@ -587,6 +589,10 @@ class Database:
             symbol: Trading symbol
             interval: Candle interval
             limit: Maximum candles to return (1 to MAX_QUERY_LIMIT)
+            live_only: If True, only return candles from the last `live_days` days.
+                       Use this for predictions and retraining so historical backfill
+                       data never contaminates live trading decisions.
+            live_days: Number of days back to allow when live_only=True (default 7)
 
         Returns:
             DataFrame sorted by timestamp ascending
@@ -613,13 +619,25 @@ class Database:
             # Use datetime TEXT column for ordering — timestamps are stored as
             # little-endian BLOB which SQLite cannot natively cast to INTEGER.
             # ISO datetime strings sort correctly as text.
-            df = pd.read_sql_query('''
-                SELECT timestamp, datetime, open, high, low, close, volume
-                FROM candles
-                WHERE symbol = ? AND interval = ?
-                ORDER BY datetime DESC
-                LIMIT ?
-            ''', conn, params=(symbol, interval, limit))
+            if live_only:
+                # Only return candles from the last live_days to ensure predictions
+                # and retraining are always based on real recent market data.
+                cutoff = (datetime.utcnow() - timedelta(days=live_days)).isoformat()
+                df = pd.read_sql_query('''
+                    SELECT timestamp, datetime, open, high, low, close, volume
+                    FROM candles
+                    WHERE symbol = ? AND interval = ? AND datetime >= ?
+                    ORDER BY datetime DESC
+                    LIMIT ?
+                ''', conn, params=(symbol, interval, cutoff, limit))
+            else:
+                df = pd.read_sql_query('''
+                    SELECT timestamp, datetime, open, high, low, close, volume
+                    FROM candles
+                    WHERE symbol = ? AND interval = ?
+                    ORDER BY datetime DESC
+                    LIMIT ?
+                ''', conn, params=(symbol, interval, limit))
 
         if not df.empty:
             # Convert BLOB timestamps to proper Python integers

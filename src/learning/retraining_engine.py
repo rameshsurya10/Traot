@@ -439,10 +439,15 @@ class RetrainingEngine:
         # 1. Fetch recent candles from database
         logger.debug(f"Fetching {recent_candles} candles for {symbol} @ {interval}")
 
+        # live_only=True — retraining must use real recent market data only.
+        # Historical backfill is for initial pre-training; ongoing retraining
+        # must reflect the current market regime, not data from months ago.
         candles = self.db.get_candles(
             symbol=symbol,
             interval=interval,
-            limit=recent_candles + 100  # Fetch extra for indicator warmup
+            limit=recent_candles + 100,  # Extra for indicator warmup
+            live_only=True,
+            live_days=30  # Use last 30 days for retraining context
         )
 
         # Use stored retrain_config instead of re-traversing config path

@@ -531,12 +531,15 @@ class ContinuousLearningSystem:
                 if data and data.get('interval') == interval:
                     df = data.get('candles')
                 else:
-                    # Fetch from database
+                    # Fetch from database — live_only=True ensures predictions are
+                    # always based on real current market data, never old backfill.
                     sequence_length = self._get_sequence_length(interval)
                     df = self.database.get_candles(
                         symbol=symbol,
                         interval=interval,
-                        limit=sequence_length + 100  # Extra for feature calculation
+                        limit=sequence_length + 100,  # Extra for feature calculation
+                        live_only=True,
+                        live_days=14  # 14 days of live candles for feature context
                     )
 
                 if df is None or len(df) < 10:
@@ -1063,7 +1066,9 @@ class ContinuousLearningSystem:
                             df = self.database.get_candles(
                                 symbol=symbol,
                                 interval=interval,
-                                limit=seq_length + 10
+                                limit=seq_length + 10,
+                                live_only=True,
+                                live_days=7
                             )
 
                         if df is not None and len(df) >= 10:
