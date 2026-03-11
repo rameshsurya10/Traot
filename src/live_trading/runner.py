@@ -1146,7 +1146,10 @@ class LiveTradingRunner:
                     try:
                         # Get historical data from database
                         if self._database:
-                            candles = self._database.get_candles(symbol, interval='1h', limit=5000)
+                            candles = self._database.get_candles(
+                                symbol, interval='1h', limit=5000,
+                                live_only=True, live_days=30
+                            )
                             if candles is not None and len(candles) >= boost_cfg.get('min_samples', 500):
                                 boost_acc = self._prediction_system.boosted_predictor.fit(
                                     candles, symbol
@@ -1551,10 +1554,14 @@ class LiveTradingRunner:
         """Load historical data into buffer for the specific symbol."""
         try:
             interval = ts.interval or self.config.data.interval or '1h'
+            # live_only=True — the in-memory buffer used by live trading must
+            # only contain real recent candles, never old backfill data.
             df = self._database.get_candles(
                 symbol=symbol,
                 interval=interval,
-                limit=200
+                limit=200,
+                live_only=True,
+                live_days=7
             )
             if df is not None and len(df) > 0:
                 self._data_buffers[symbol] = df

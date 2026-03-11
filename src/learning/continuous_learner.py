@@ -1116,7 +1116,8 @@ class ContinuousLearningSystem:
                     logger.debug(f"Cannot determine actual outcome for {symbol}, skipping")
                     return
 
-            # Get data for features
+            # Get data for features — live_only=True ensures online updates
+            # never use old backfill candles for model weight adjustments.
             if data and data.get('candles') is not None:
                 df = data['candles']
             else:
@@ -1124,7 +1125,9 @@ class ContinuousLearningSystem:
                 df = self.database.get_candles(
                     symbol=symbol,
                     interval=interval,
-                    limit=sequence_length + 10
+                    limit=sequence_length + 10,
+                    live_only=True,
+                    live_days=7
                 )
 
             if df is None or len(df) < 10:

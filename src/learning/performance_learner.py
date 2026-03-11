@@ -551,12 +551,16 @@ class PerformanceBasedLearner:
 
             start_time = datetime.utcnow()
 
-            # Fetch training data for all configured timeframes
+            # Fetch training data for all configured timeframes.
+            # live_only=True — performance-based retraining must reflect
+            # the current market regime, not old historical data.
             for interval in self.config.timeframes:
                 df = self.database.get_candles(
                     symbol=outcome.symbol,
                     interval=interval,
-                    limit=candles + 200  # Extra for indicators
+                    limit=candles + 200,  # Extra for indicators
+                    live_only=True,
+                    live_days=30
                 )
 
                 if df is None or len(df) < 500:
