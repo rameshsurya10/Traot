@@ -341,11 +341,18 @@ class Database:
                     features_snapshot TEXT,
                     regime TEXT,
                     is_paper_trade INTEGER DEFAULT 0,
+                    is_replay INTEGER DEFAULT 0,
                     closed_by TEXT,
                     strategy_name TEXT,
                     FOREIGN KEY (signal_id) REFERENCES signals(id)
                 )
             ''')
+
+            # Migration: add is_replay column if it doesn't exist yet (for existing DBs)
+            try:
+                cursor.execute('ALTER TABLE trade_outcomes ADD COLUMN is_replay INTEGER DEFAULT 0')
+            except Exception:
+                pass  # Column already exists
 
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol_interval
@@ -1157,6 +1164,7 @@ class Database:
         features_snapshot: str = None,
         regime: str = None,
         is_paper_trade: bool = False,
+        is_replay: bool = False,
         closed_by: str = None,
         strategy_name: str = None
     ) -> int:
@@ -1195,15 +1203,15 @@ class Database:
                  entry_time, exit_time, predicted_direction, predicted_confidence,
                  predicted_probability, actual_direction, was_correct,
                  pnl_percent, pnl_absolute, features_snapshot, regime,
-                 is_paper_trade, closed_by, strategy_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 is_paper_trade, is_replay, closed_by, strategy_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, symbol, interval, entry_price, exit_price,
                 entry_time, exit_time,
                 predicted_direction, predicted_confidence, predicted_probability,
                 actual_direction, int(was_correct), pnl_percent, pnl_absolute,
-                features_snapshot, regime, int(is_paper_trade), closed_by,
-                strategy_name
+                features_snapshot, regime, int(is_paper_trade), int(is_replay),
+                closed_by, strategy_name
             ))
             return cursor.lastrowid
 

@@ -209,7 +209,8 @@ class DailyReportScheduler:
         )
         signals = cur.fetchone()[0]
         cur.execute(
-            "SELECT COUNT(*) FROM trade_outcomes WHERE entry_time >= ? AND entry_time <= ?",
+            "SELECT COUNT(*) FROM trade_outcomes WHERE entry_time >= ? AND entry_time <= ? "
+            "AND COALESCE(is_replay, 0) = 0",
             (start, end),
         )
         trades = cur.fetchone()[0]
@@ -250,7 +251,8 @@ class DailyReportScheduler:
             "  SUM(CASE WHEN was_correct=1 THEN 1 ELSE 0 END), "
             "  AVG(pnl_percent), SUM(pnl_percent), AVG(predicted_confidence) "
             "FROM trade_outcomes "
-            "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NOT NULL",
+            "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NOT NULL "
+            "AND COALESCE(is_replay, 0) = 0",
             (start, end),
         )
         row = cur.fetchone()
@@ -258,7 +260,8 @@ class DailyReportScheduler:
         avg_pnl, total_pnl, avg_conf = (row[2] or 0), (row[3] or 0), (row[4] or 0)
         cur.execute(
             "SELECT COUNT(*) FROM trade_outcomes "
-            "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NULL",
+            "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NULL "
+            "AND COALESCE(is_replay, 0) = 0",
             (start, end),
         )
         still_open = cur.fetchone()[0]
@@ -276,6 +279,7 @@ class DailyReportScheduler:
             "  entry_price, exit_price, entry_time, exit_time, "
             "  was_correct, pnl_percent, regime, strategy_name, closed_by "
             "FROM trade_outcomes WHERE entry_time >= ? AND entry_time <= ? "
+            "AND COALESCE(is_replay, 0) = 0 "
             "ORDER BY entry_time ASC", (start, end),
         )
         return [dict(r) for r in cur.fetchall()]
@@ -289,6 +293,7 @@ class DailyReportScheduler:
             "  AVG(predicted_confidence) as avg_conf, MAX(predicted_confidence) as max_conf "
             "FROM trade_outcomes "
             "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NOT NULL "
+            "AND COALESCE(is_replay, 0) = 0 "
             "GROUP BY symbol ORDER BY total_pnl DESC", (start, end),
         )
         return [dict(r) for r in cur.fetchall()]

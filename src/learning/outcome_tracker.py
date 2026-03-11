@@ -125,6 +125,7 @@ class OutcomeTracker:
         features: np.ndarray = None,
         regime: str = None,
         is_paper_trade: bool = False,
+        is_replay: bool = False,
         strategy_name: str = None
     ) -> dict:
         """
@@ -208,6 +209,7 @@ class OutcomeTracker:
                 features_snapshot=features_json,
                 regime=regime,
                 is_paper_trade=is_paper_trade,
+                is_replay=is_replay,
                 strategy_name=strategy_name
             )
 
