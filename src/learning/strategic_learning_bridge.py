@@ -295,13 +295,24 @@ class StrategicLearningBridge:
         """
         Reload PENDING signals from DB into _open_trades on startup.
 
-        Without this, trades opened before a process restart are orphaned:
-        _open_trades is empty so _check_and_close_trades never evaluates them.
-        Queries the DB directly to get symbol + interval columns (not in get_pending_signals()).
+        Only recovers trades opened within the last max_holding_hours window.
+        Any older pending signals are expired immediately — they are either
+        stale replay signals or orphaned trades that can no longer be evaluated
+        meaningfully against current live prices.
         """
         try:
             from datetime import timedelta
-            cutoff = datetime.utcnow() - timedelta(hours=48)
+
+            # First expire ALL signals older than max_holding_hours (default 24h).
+            # This clears any fake replay signals or stale trades from before restarts.
+            exit_config = self.config.get('continuous_learning', {}).get('exit_logic', {})
+            max_holding_hours = exit_config.get('max_holding_hours', 24)
+            expired = self.database.close_stale_signals(max_age_hours=max_holding_hours)
+            if expired:
+                logger.info(f"Startup cleanup: expired {expired} stale/replay signals older than {max_holding_hours}h")
+
+            # Only recover trades opened within the holding window
+            cutoff = datetime.utcnow() - timedelta(hours=max_holding_hours)
             cutoff_ms = int(cutoff.timestamp() * 1000)
 
             recovered = 0
@@ -450,7 +461,10 @@ class StrategicLearningBridge:
 
             with self._trades_lock:
                 for signal_id, trade in list(self._open_trades.items()):
-                    if trade.symbol != symbol:
+                    # Only evaluate trades for this exact symbol AND timeframe.
+                    # A 15m candle must not close a 1h trade — each trade is
+                    # only evaluated when its own timeframe candle closes.
+                    if trade.symbol != symbol or trade.interval != candle.interval:
                         continue
 
                     # VALIDATION: Sanity check prices
