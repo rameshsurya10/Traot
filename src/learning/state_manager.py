@@ -223,10 +223,14 @@ class LearningStateManager:
         confidence: float,
         mode: str
     ):
-        """Record confidence score to history."""
+        """Record confidence score to history in database."""
         try:
-            # This would use the confidence_history table
-            # For now, just log
+            self.db.save_confidence_score(
+                symbol=symbol,
+                interval=interval,
+                confidence=confidence,
+                mode=mode
+            )
             logger.debug(
                 f"Confidence recorded: {symbol} @ {interval} = {confidence:.1%} ({mode})"
             )

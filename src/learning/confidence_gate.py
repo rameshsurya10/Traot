@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ConfidenceGateConfig:
     """Configuration for confidence gate."""
-    trading_threshold: float = 0.65  # Enter TRADING mode at 65%
+    trading_threshold: float = 0.80  # Enter TRADING mode at 80%
     hysteresis: float = 0.05  # Exit TRADING at 75% (80% - 5%)
     smoothing_alpha: float = 0.3  # EMA smoothing (0=no smoothing, 1=no memory)
     regime_adjustment: bool = True  # Adjust threshold by market regime

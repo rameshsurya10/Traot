@@ -210,7 +210,7 @@ class DailyReportScheduler:
         signals = cur.fetchone()[0]
         cur.execute(
             "SELECT COUNT(*) FROM trade_outcomes WHERE entry_time >= ? AND entry_time <= ? "
-            "AND COALESCE(is_replay, 0) = 0",
+            "AND COALESCE(is_replay, 0) = 0 AND COALESCE(is_paper_trade, 0) = 0",
             (start, end),
         )
         trades = cur.fetchone()[0]
@@ -252,7 +252,7 @@ class DailyReportScheduler:
             "  AVG(pnl_percent), SUM(pnl_percent), AVG(predicted_confidence) "
             "FROM trade_outcomes "
             "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NOT NULL "
-            "AND COALESCE(is_replay, 0) = 0",
+            "AND COALESCE(is_replay, 0) = 0 AND COALESCE(is_paper_trade, 0) = 0",
             (start, end),
         )
         row = cur.fetchone()
@@ -261,7 +261,7 @@ class DailyReportScheduler:
         cur.execute(
             "SELECT COUNT(*) FROM trade_outcomes "
             "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NULL "
-            "AND COALESCE(is_replay, 0) = 0",
+            "AND COALESCE(is_replay, 0) = 0 AND COALESCE(is_paper_trade, 0) = 0",
             (start, end),
         )
         still_open = cur.fetchone()[0]
@@ -279,7 +279,7 @@ class DailyReportScheduler:
             "  entry_price, exit_price, entry_time, exit_time, "
             "  was_correct, pnl_percent, regime, strategy_name, closed_by "
             "FROM trade_outcomes WHERE entry_time >= ? AND entry_time <= ? "
-            "AND COALESCE(is_replay, 0) = 0 "
+            "AND COALESCE(is_replay, 0) = 0 AND COALESCE(is_paper_trade, 0) = 0 "
             "ORDER BY entry_time ASC", (start, end),
         )
         return [dict(r) for r in cur.fetchall()]
@@ -293,7 +293,7 @@ class DailyReportScheduler:
             "  AVG(predicted_confidence) as avg_conf, MAX(predicted_confidence) as max_conf "
             "FROM trade_outcomes "
             "WHERE entry_time >= ? AND entry_time <= ? AND was_correct IS NOT NULL "
-            "AND COALESCE(is_replay, 0) = 0 "
+            "AND COALESCE(is_replay, 0) = 0 AND COALESCE(is_paper_trade, 0) = 0 "
             "GROUP BY symbol ORDER BY total_pnl DESC", (start, end),
         )
         return [dict(r) for r in cur.fetchall()]
@@ -661,9 +661,9 @@ class DailyReportScheduler:
     </table>
   </div>
 
-  <!-- 5. Trade Log -->
+  <!-- 5. Trade Log (Live Trades Only) -->
   <div style="{CARD}">
-    <h2 style="{HEADING}">5. Trade Log</h2>
+    <h2 style="{HEADING}">5. Trade Log (Live Only)</h2>
     <table style="width:100%;border-collapse:collapse">
       <tr style="border-bottom:2px solid #e5e7eb">
         <th style="{TH}">Time</th><th style="{TH};text-align:center">TF</th><th style="{TH}">Symbol</th>
@@ -782,7 +782,7 @@ class DailyReportScheduler:
             lines.append("   No closed trades today.")
         lines += [
             "",
-            "5. TRADE LOG",
+            "5. TRADE LOG (Live Only)",
         ]
         for tr in data['trade_list'][:20]:
             entry_t = (tr['entry_time'] or '')[-8:]
@@ -927,8 +927,8 @@ class DailyReportScheduler:
         else:
             elements.append(Paragraph("No closed trades today.", body_s))
 
-        # 5. Trade Log (full list in PDF)
-        elements.append(Paragraph("5. Trade Log", h2_s))
+        # 5. Trade Log (full list in PDF — live trades only)
+        elements.append(Paragraph("5. Trade Log (Live Only)", h2_s))
         if data['trade_list']:
             t_header = ['Time', 'TF', 'Symbol', 'Dir', 'Entry', 'Exit', 'P&L%', 'Conf', 'Result']
             t_rows = []

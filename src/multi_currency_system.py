@@ -411,6 +411,9 @@ class MultiCurrencySystem:
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
+        # Database reference for sentiment features (set by runner)
+        self._database = None
+
         # Initialize components
         self.model_manager = ModelManager(self.config.get('model', {}).get('models_dir', 'models'))
         self.auto_trainer = AutoTrainer(self.model_manager, self.config.get('model', {}))
@@ -588,11 +591,22 @@ class MultiCurrencySystem:
                 except Exception as e:
                     logger.debug(f"Trend consensus skipped for {symbol}: {e}")
 
+            # Get sentiment features from database (if available)
+            sentiment_features = None
+            if self._database and self.config.get('news', {}).get('enabled', False):
+                try:
+                    last_ts = int(df['timestamp'].iloc[-1]) if 'timestamp' in df.columns else None
+                    if last_ts:
+                        sentiment_features = self._database.get_sentiment_features(last_ts)
+                except Exception as e:
+                    logger.debug(f"Sentiment features unavailable for {symbol}: {e}")
+
             # Get advanced mathematical prediction
             atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
             advanced_result = self.advanced_predictor.predict(
                 df=df, symbol=symbol, lstm_probability=combined_prob, atr=atr,
                 trend_probability=trend_prob,
+                sentiment_features=sentiment_features,
             )
 
             # Build result

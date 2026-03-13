@@ -317,6 +317,17 @@ class ContinuousLearningSystem:
                 interval=primary_interval
             )
 
+            # 5b. RECORD CONFIDENCE to history (every prediction, not just transitions)
+            try:
+                self.database.save_confidence_score(
+                    symbol=symbol,
+                    interval=primary_interval,
+                    confidence=aggregated.confidence,
+                    mode=current_mode
+                )
+            except Exception:
+                pass  # Non-critical — don't block trading
+
             # 6. DETERMINE MODE AND BROKERAGE
             # confidence_gate.should_trade() is the single authority for mode decision
             # (it already checks confidence vs trading_threshold with hysteresis + regime)
@@ -403,10 +414,11 @@ class ContinuousLearningSystem:
             )
 
             if aggregated.direction != 'NEUTRAL':
-                # In LEARNING mode, always execute paper trades for training data
-                # In TRADING mode, trade if strategy is recommended OR no strategies exist yet (fresh start)
+                # TRADING mode: execute live trades when strategy approves (or no strategies discovered yet)
+                # LEARNING mode: save signal to DB for strategy analysis but do NOT open a tracked trade
+                #   → prevents paper trades from inflating trade_outcomes and appearing in reports
                 no_strategies_yet = best_strategy is None
-                should_execute = (mode == 'LEARNING') or (mode == 'TRADING' and (strategy_approved or no_strategies_yet))
+                should_execute = (mode == 'TRADING') and (strategy_approved or no_strategies_yet)
 
                 if should_execute:
                     # Generate perf_signal_id BEFORE executing trade
@@ -425,7 +437,7 @@ class ContinuousLearningSystem:
                         stop_loss=sl,
                         take_profit=tp
                     )
-                    executed = True
+                    executed = signal_id is not None
 
                     # Track prediction in PerformanceBasedLearner (AFTER trade executed)
                     if self.performance_learner and perf_signal_id and entry_price:
@@ -447,12 +459,17 @@ class ContinuousLearningSystem:
                         f"{aggregated.confidence:.2%} ({brokerage_type}){strategy_info}"
                     )
 
-                    with self._stats_lock:
-                        self._stats['trades_executed'] += 1
-                        if mode == 'LEARNING':
-                            self._stats['paper_trades'] += 1
-                        else:
+                    if executed:
+                        with self._stats_lock:
+                            self._stats['trades_executed'] += 1
                             self._stats['live_trades'] += 1
+                elif mode == 'LEARNING':
+                    # LEARNING mode: log signal for analysis but don't open a tracked trade
+                    logger.info(
+                        f"[{symbol}] LEARNING MODE: {aggregated.direction} @ "
+                        f"{aggregated.confidence:.2%} - signal logged, no trade opened "
+                        f"(need {self.confidence_gate.config.trading_threshold:.0%} to enter TRADING)"
+                    )
                 else:
                     logger.info(
                         f"[{symbol}] Trade SKIPPED: {aggregated.direction} @ "
@@ -863,6 +880,20 @@ class ContinuousLearningSystem:
             Signal ID or None
         """
         try:
+            # HARD CONFIDENCE FLOOR: Reject any trade whose individual signal confidence
+            # is below the trading threshold.  The confidence gate controls MODE transitions
+            # using EMA-smoothed confidence, but an individual signal can still have low
+            # confidence while the mode is TRADING (hysteresis keeps mode alive down to 75%).
+            # This guard ensures no trade actually executes below the configured threshold.
+            if not is_paper:
+                trading_threshold = self.confidence_gate.config.trading_threshold
+                if prediction.confidence < trading_threshold:
+                    logger.info(
+                        f"[{symbol} @ {interval}] Trade BLOCKED: signal confidence "
+                        f"{prediction.confidence:.1%} < threshold {trading_threshold:.1%}"
+                    )
+                    return None
+
             # Map direction to SignalType
             direction_map = {'BUY': SignalType.BUY, 'SELL': SignalType.SELL}
             signal_type = direction_map.get(prediction.direction, SignalType.NEUTRAL)
@@ -948,6 +979,25 @@ class ContinuousLearningSystem:
         # Skip retraining during historical replay
         if self.replay_mode:
             return
+
+        # Cooldown: prevent retraining same model too frequently
+        retrain_cfg = self.cl_config.get('retraining', {})
+        min_interval_hours = retrain_cfg.get('min_interval_hours', 1)
+        now = datetime.utcnow()
+
+        if not hasattr(self, '_last_retrain_times'):
+            self._last_retrain_times = {}
+
+        last_retrain = self._last_retrain_times.get(key)
+        if last_retrain:
+            hours_since = (now - last_retrain).total_seconds() / 3600
+            if hours_since < min_interval_hours:
+                logger.debug(
+                    f"[{key}] Retraining cooldown: {hours_since:.1f}h < {min_interval_hours}h"
+                )
+                return
+
+        self._last_retrain_times[key] = now
 
         with self._threads_lock:
             # Check if already retraining

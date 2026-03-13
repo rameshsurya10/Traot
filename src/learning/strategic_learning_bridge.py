@@ -251,17 +251,43 @@ class StrategicLearningBridge:
             # Replay is pre-workout for the model only; only live candles create real trades.
             is_replay = result.get('reason') == 'replay_mode'
             if not is_replay and result.get('executed') and result.get('signal_id'):
-                # Merge entry_price into prediction dict for trade tracking
-                prediction_dict = result['aggregated_signal']
-                if result.get('entry_price'):
-                    prediction_dict['entry_price'] = result['entry_price']
-                self._track_new_trade(
-                    signal_id=result['signal_id'],
-                    symbol=symbol,
-                    interval=interval,
-                    prediction=prediction_dict,
-                    is_paper=(result['mode'] == 'LEARNING')
-                )
+                # Guard: prevent accumulating too many open trades per symbol.
+                # This stops the batch-dump pattern where dozens of stale trades
+                # all close against one candle price producing identical exits.
+                max_open = self.config.get('continuous_learning', {}).get(
+                    'exit_logic', {}
+                ).get('max_open_trades_per_symbol', 2)
+                with self._trades_lock:
+                    open_for_symbol = sum(
+                        1 for t in self._open_trades.values() if t.symbol == symbol
+                    )
+                if open_for_symbol >= max_open:
+                    logger.warning(
+                        f"[{symbol}] Max open trades guard: already {open_for_symbol} open "
+                        f"(limit {max_open}), expiring signal {result['signal_id']}"
+                    )
+                    # Mark the orphan signal as EXPIRED so it doesn't sit PENDING forever
+                    try:
+                        self.database.close_signal(
+                            signal_id=result['signal_id'],
+                            outcome='EXPIRED',
+                            exit_price=0.0,
+                            pnl_percent=0.0
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to expire over-limit signal: {e}")
+                else:
+                    # Merge entry_price into prediction dict for trade tracking
+                    prediction_dict = result['aggregated_signal']
+                    if result.get('entry_price'):
+                        prediction_dict['entry_price'] = result['entry_price']
+                    self._track_new_trade(
+                        signal_id=result['signal_id'],
+                        symbol=symbol,
+                        interval=interval,
+                        prediction=prediction_dict,
+                        is_paper=(result['mode'] == 'LEARNING')
+                    )
 
             # 5. CHECK FOR COMPLETED TRADES
             # Skip during replay — exit prices from historical candles are not real live prices.
@@ -342,6 +368,15 @@ class StrategicLearningBridge:
                 except Exception:
                     entry_time = datetime.utcnow()
 
+                # Infer is_paper from confidence: if the signal's confidence was above
+                # the trading threshold, it was opened in TRADING mode (live).
+                # Default to is_paper=False so live trade outcomes are never silently lost.
+                conf_threshold = self.config.get('continuous_learning', {}).get(
+                    'confidence', {}
+                ).get('trading_threshold', 0.80)
+                sig_confidence = row['confidence'] or 0.0
+                was_live = sig_confidence >= conf_threshold
+
                 trade = TradeRecord(
                     signal_id=sig_id,
                     symbol=symbol,
@@ -349,12 +384,12 @@ class StrategicLearningBridge:
                     entry_price=row['price'] or 0.0,
                     entry_time=entry_time,
                     direction=direction,
-                    confidence=row['confidence'] or 0.0,
+                    confidence=sig_confidence,
                     stop_loss=row['stop_loss'] or 0.0,
                     take_profit=row['take_profit'] or 0.0,
                     features=None,
                     regime='NORMAL',
-                    is_paper=True
+                    is_paper=not was_live
                 )
                 with self._trades_lock:
                     self._open_trades[sig_id] = trade
@@ -456,6 +491,11 @@ class StrategicLearningBridge:
             take_profit_pct = exit_config.get('take_profit_pct', 4.0)
             max_holding_hours = exit_config.get('max_holding_hours', 24)
 
+            # Guard: cap how many trades can close per candle to prevent batch dumps.
+            # If many stale signals accumulated (e.g. from restart/replay), closing them
+            # all against one candle price produces fake identical-exit results.
+            max_closes_per_candle = exit_config.get('max_closes_per_candle', 3)
+
             # Check all open trades for this symbol
             trades_to_close = []
 
@@ -525,6 +565,24 @@ class StrategicLearningBridge:
 
                     if should_close:
                         trades_to_close.append((signal_id, trade, current_price, close_reason))
+
+            # Enforce max closes per candle to prevent batch-dump artifacts.
+            # EXCEPTION: stop-loss closures are NEVER deferred — they limit losses.
+            if len(trades_to_close) > max_closes_per_candle:
+                # Separate stop-losses (must always close) from other reasons
+                sl_trades = [t for t in trades_to_close if t[3] == 'stop_loss']
+                other_trades = [t for t in trades_to_close if t[3] != 'stop_loss']
+
+                remaining_slots = max(0, max_closes_per_candle - len(sl_trades))
+                if other_trades and remaining_slots < len(other_trades):
+                    other_trades.sort(key=lambda t: t[1].entry_time)
+                    other_trades = other_trades[:remaining_slots]
+                    logger.warning(
+                        f"[{symbol}] Batch-close guard: capped non-SL closes to {remaining_slots} "
+                        f"(+{len(sl_trades)} stop-losses always close). "
+                        f"Deferred trades will be evaluated next candle."
+                    )
+                trades_to_close = sl_trades + other_trades
 
             # Close trades (outside lock to prevent deadlock)
             for signal_id, trade, exit_price, close_reason in trades_to_close:
@@ -613,11 +671,22 @@ class StrategicLearningBridge:
                 f"{'[PAPER]' if trade.is_paper else '[LIVE]'}"
             )
 
-            # If retraining triggered, log it
+            # If retraining triggered, actually execute it
             if outcome.get('should_retrain'):
+                trigger_reason = outcome.get('trigger_reason', 'unknown')
                 logger.info(
-                    f"[{trade.symbol}] 🔄 Retraining triggered: {outcome['trigger_reason']}"
+                    f"[{trade.symbol}] 🔄 Retraining triggered: {trigger_reason}"
                 )
+                try:
+                    self.learning_system._schedule_retrain(
+                        symbol=trade.symbol,
+                        interval=trade.interval,
+                        reason=trigger_reason
+                    )
+                except Exception as retrain_err:
+                    logger.error(
+                        f"[{trade.symbol}] Failed to schedule retraining: {retrain_err}"
+                    )
 
         except Exception as e:
             logger.error(f"Failed to record outcome: {e}", exc_info=True)

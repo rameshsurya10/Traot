@@ -334,6 +334,9 @@ class LiveTradingRunner:
             # Start daily report email scheduler
             self._start_daily_report()
 
+            # Start boosted model retraining scheduler
+            self._start_boosted_retrain_scheduler()
+
             self._start_time = datetime.utcnow()
             self._set_status(RunnerStatus.RUNNING)
 
@@ -535,6 +538,7 @@ class LiveTradingRunner:
 
         # Prediction System
         self._prediction_system = MultiCurrencySystem(self._config_path)
+        self._prediction_system._database = self._database  # Wire DB for sentiment features
         for symbol in self._symbols.keys():
             ts = self._symbols[symbol]
             self._prediction_system.add_currency(
@@ -1604,6 +1608,57 @@ class LiveTradingRunner:
         except Exception as e:
             logger.warning(f"Daily report scheduler failed to start: {e}")
             self._daily_report = None
+
+    def _start_boosted_retrain_scheduler(self):
+        """Schedule periodic retraining of XGBoost/LightGBM models."""
+        boost_cfg = self.config.raw.get('boosting', {})
+        if not boost_cfg.get('enabled', True):
+            return
+
+        retrain_hours = boost_cfg.get('retrain_interval', 168)  # Default: weekly
+
+        def _boosted_retrain_loop():
+            """Background loop to retrain boosting models periodically."""
+            while self._running:
+                try:
+                    # Sleep for the configured interval
+                    for _ in range(int(retrain_hours * 3600)):
+                        if not self._running:
+                            return
+                        time.sleep(1)
+
+                    if not self._running:
+                        return
+
+                    logger.info("Scheduled boosted model retraining starting...")
+                    for symbol in self._symbols:
+                        try:
+                            if self._database and self._prediction_system:
+                                candles = self._database.get_candles(
+                                    symbol, interval='1h', limit=5000,
+                                    live_only=True, live_days=30
+                                )
+                                min_samples = boost_cfg.get('min_samples', 500)
+                                if candles is not None and len(candles) >= min_samples:
+                                    acc = self._prediction_system.boosted_predictor.fit(
+                                        candles, symbol
+                                    )
+                                    if acc > 0:
+                                        logger.info(
+                                            f"[{symbol}] Boosted retrain complete: {acc:.2%}"
+                                        )
+                        except Exception as e:
+                            logger.warning(f"[{symbol}] Boosted retrain failed: {e}")
+
+                except Exception as e:
+                    logger.error(f"Boosted retrain scheduler error: {e}")
+                    time.sleep(60)
+
+        thread = threading.Thread(
+            target=_boosted_retrain_loop, daemon=True, name="BoostedRetrain"
+        )
+        thread.start()
+        logger.info(f"Boosted retrain scheduler started (every {retrain_hours}h)")
 
     # =========================================================================
     # DATA HANDLERS
