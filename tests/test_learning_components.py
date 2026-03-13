@@ -47,34 +47,35 @@ def test_confidence_gate_basic():
     logger.info(f"✓ Low confidence: {reason}")
 
     # Test 2: LEARNING mode, high confidence - should trade
+    # Default threshold is 0.80, so 0.85 should trade
     can_trade, reason = gate.should_trade(
-        confidence=0.70,
+        confidence=0.85,
         current_mode='LEARNING',
         regime='NORMAL'
     )
-    assert can_trade, "Should trade with 70% confidence (threshold=65%)"
+    assert can_trade, "Should trade with 85% confidence (threshold=80%)"
     assert "threshold" in reason.lower()
     logger.info(f"✓ High confidence: {reason}")
 
     # Test 3: TRADING mode, confidence above exit threshold - maintain
-    # Exit threshold = 0.65 - 0.05 hysteresis = 0.60
+    # Exit threshold = 0.80 - 0.05 hysteresis = 0.75
     can_trade, reason = gate.should_trade(
-        confidence=0.63,
+        confidence=0.78,
         current_mode='TRADING',
         regime='NORMAL'
     )
-    assert can_trade, "Should maintain TRADING at 63% (above 60% exit)"
+    assert can_trade, "Should maintain TRADING at 78% (above 75% exit)"
     assert "maintaining" in reason.lower()
     logger.info(f"✓ Maintaining TRADING: {reason}")
 
     # Test 4: TRADING mode, confidence below exit threshold - switch to LEARNING
-    # Exit threshold = 0.65 - 0.05 hysteresis = 0.60
+    # Exit threshold = 0.80 - 0.05 hysteresis = 0.75
     can_trade, reason = gate.should_trade(
-        confidence=0.55,
+        confidence=0.70,
         current_mode='TRADING',
         regime='NORMAL'
     )
-    assert not can_trade, "Should exit TRADING at 55% (below 60% exit)"
+    assert not can_trade, "Should exit TRADING at 70% (below 75% exit)"
     assert "exit threshold" in reason.lower()
     logger.info(f"✓ Exit to LEARNING: {reason}")
 
@@ -118,10 +119,10 @@ def test_confidence_gate_regime_adjustment():
     gate = ConfidenceGate(ConfidenceGateConfig(regime_adjustment=True))
 
     regimes_and_results = [
-        ('TRENDING', 0.61, True),   # Easier threshold (60% = 65% - 5%)
-        ('NORMAL', 0.60, False),    # Standard threshold (65%), 60% is below
-        ('CHOPPY', 0.68, True),     # Standard: 65% (penalty already in predictor)
-        ('VOLATILE', 0.68, True),   # Standard: 65% (penalty already in predictor)
+        ('TRENDING', 0.76, True),   # Easier threshold (75% = 80% - 5%)
+        ('NORMAL', 0.75, False),    # Standard threshold (80%), 75% is below
+        ('CHOPPY', 0.83, True),     # Standard: 80% (penalty already in predictor)
+        ('VOLATILE', 0.83, True),   # Standard: 80% (penalty already in predictor)
     ]
 
     for regime, confidence, expected_can_trade in regimes_and_results:
@@ -426,13 +427,13 @@ def test_integration_full_flow():
     assert mode == 'LEARNING'
     logger.info(f"✓ Initial mode: {mode}")
 
-    # Low confidence - should not trade (below 65% threshold)
+    # Low confidence - should not trade (below 80% threshold)
     can_trade, reason = gate.should_trade(0.50, mode, 'NORMAL')
     assert not can_trade
     logger.info(f"✓ Low confidence: {reason}")
 
-    # High confidence - should trade (above 65% threshold)
-    can_trade, reason = gate.should_trade(0.70, mode, 'NORMAL')
+    # High confidence - should trade (above 80% threshold)
+    can_trade, reason = gate.should_trade(0.85, mode, 'NORMAL')
     assert can_trade
     logger.info(f"✓ High confidence: {reason}")
 

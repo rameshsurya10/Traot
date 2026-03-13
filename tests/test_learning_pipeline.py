@@ -684,24 +684,24 @@ class TestConfidenceGateEdgeCases:
         """Test exact boundary values (80%, 75%)."""
         gate = ConfidenceGate()
 
-        # Exactly at threshold (0.65)
-        can_trade, _ = gate.should_trade(0.65, 'LEARNING', 'NORMAL')
+        # Exactly at threshold (0.80)
+        can_trade, _ = gate.should_trade(0.80, 'LEARNING', 'NORMAL')
         assert can_trade is True  # Should trade at exact threshold
 
-        # Exactly at exit threshold (0.65 - 0.05 = 0.60)
-        can_trade, _ = gate.should_trade(0.60, 'TRADING', 'NORMAL')
+        # Exactly at exit threshold (0.80 - 0.05 = 0.75)
+        can_trade, _ = gate.should_trade(0.75, 'TRADING', 'NORMAL')
         assert can_trade is True  # Should maintain at exact exit threshold (not below)
 
         # Just below exit threshold
-        can_trade, _ = gate.should_trade(0.599, 'TRADING', 'NORMAL')
+        can_trade, _ = gate.should_trade(0.749, 'TRADING', 'NORMAL')
         assert can_trade is False
 
     def test_invalid_mode_defaults_to_learning(self):
         """Test invalid mode is handled gracefully."""
         gate = ConfidenceGate()
-        can_trade, _ = gate.should_trade(0.70, 'INVALID_MODE', 'NORMAL')
+        can_trade, _ = gate.should_trade(0.85, 'INVALID_MODE', 'NORMAL')
         # Should default to LEARNING mode behavior
-        assert can_trade is True  # 70% > 65% threshold
+        assert can_trade is True  # 85% > 80% threshold
 
     def test_trending_easier_threshold(self):
         """Test TRENDING regime lowers threshold."""
@@ -847,10 +847,10 @@ class TestLearningPipelineIntegration:
         assert mode == 'LEARNING'
 
         can_trade, reason = gate.should_trade(0.50, mode, 'NORMAL')
-        assert can_trade is False  # Below 65%
+        assert can_trade is False  # Below 80%
 
         # Phase 2: Model improves, enters TRADING mode
-        can_trade, reason = gate.should_trade(0.70, mode, 'NORMAL')
+        can_trade, reason = gate.should_trade(0.85, mode, 'NORMAL')
         assert can_trade is True
         state_mgr.transition_to_trading(symbol, interval, 0.85)
 

@@ -353,9 +353,11 @@ notifications:
     sound: true
     sound_file: alert.wav
   telegram:
-    enabled: false
-    bot_token: ''
-    chat_id: ''
+    enabled: true
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+    notify_on_trade: true
+    notify_daily_summary: true
   email:
     enabled: false
     smtp_server: smtp.gmail.com

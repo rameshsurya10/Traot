@@ -239,6 +239,9 @@ class LiveTradingRunner:
         # Daily report scheduler
         self._daily_report = None
 
+        # Telegram bot
+        self._telegram_bot = None
+
         # Stats
         self._start_time: Optional[datetime] = None
         self._total_signals = 0
@@ -337,6 +340,9 @@ class LiveTradingRunner:
             # Start boosted model retraining scheduler
             self._start_boosted_retrain_scheduler()
 
+            # Start Telegram bot (if configured)
+            self._start_telegram_bot()
+
             self._start_time = datetime.utcnow()
             self._set_status(RunnerStatus.RUNNING)
 
@@ -419,6 +425,11 @@ class LiveTradingRunner:
         if self._daily_report:
             self._daily_report.stop()
             self._daily_report = None
+
+        # Stop Telegram bot
+        if self._telegram_bot:
+            self._telegram_bot.stop()
+            self._telegram_bot = None
 
         self._set_status(RunnerStatus.STOPPED)
         logger.info("Live trading stopped")
@@ -1609,6 +1620,45 @@ class LiveTradingRunner:
             logger.warning(f"Daily report scheduler failed to start: {e}")
             self._daily_report = None
 
+    def _start_telegram_bot(self):
+        """Start the Telegram bot for remote monitoring and control."""
+        try:
+            telegram_cfg = self.config.raw.get('notifications', {}).get('telegram', {})
+            if not telegram_cfg.get('enabled', False):
+                logger.info("Telegram bot disabled in config")
+                return
+
+            token = os.environ.get(
+                telegram_cfg.get('bot_token_env', 'TELEGRAM_BOT_TOKEN'), ''
+            )
+            chat_id = os.environ.get(
+                telegram_cfg.get('chat_id_env', 'TELEGRAM_CHAT_ID'), ''
+            )
+
+            if not token or not chat_id:
+                logger.warning("Telegram bot token or chat_id not set in .env")
+                return
+
+            from src.telegram_bot import TelegramBot
+            self._telegram_bot = TelegramBot(
+                token=token,
+                chat_id=chat_id,
+                runner=self,
+                database=self._database,
+                config=self.config.raw,
+            )
+            self._telegram_bot.start()
+
+            # Wire telegram notifications into the learning bridge
+            if self._learning_bridge:
+                self._learning_bridge._telegram_bot = self._telegram_bot
+
+            logger.info("Telegram bot started")
+
+        except Exception as e:
+            logger.warning(f"Telegram bot failed to start: {e}")
+            self._telegram_bot = None
+
     def _start_boosted_retrain_scheduler(self):
         """Schedule periodic retraining of XGBoost/LightGBM models."""
         boost_cfg = self.config.raw.get('boosting', {})
@@ -1981,6 +2031,20 @@ class LiveTradingRunner:
                     callback(order)
                 except Exception as e:
                     logger.error(f"Order callback error: {e}")
+
+            # Telegram notification for trade opened
+            if self._telegram_bot:
+                try:
+                    self._telegram_bot.notify_trade_opened({
+                        'symbol': signal.symbol,
+                        'direction': order.side.name,
+                        'entry_price': signal.entry_price,
+                        'stop_loss': signal.stop_loss,
+                        'take_profit': signal.take_profit,
+                        'confidence': signal.confidence,
+                    })
+                except Exception as tg_err:
+                    logger.debug(f"Telegram trade-open notification failed: {tg_err}")
 
         except Exception as e:
             logger.error(f"Execution error: {e}")

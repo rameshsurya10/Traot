@@ -171,6 +171,9 @@ class StrategicLearningBridge:
         }
         self._stats_lock = threading.Lock()
 
+        # Telegram bot reference (set by runner)
+        self._telegram_bot = None
+
         # Mode tracking per symbol
         self._current_modes: Dict[str, str] = {}  # symbol -> 'LEARNING' or 'TRADING'
         self._mode_transitions: deque = deque(maxlen=1000)  # Bounded to prevent memory leak
@@ -670,6 +673,23 @@ class StrategicLearningBridge:
                 f"- Reason: {close_reason} "
                 f"{'[PAPER]' if trade.is_paper else '[LIVE]'}"
             )
+
+            # Telegram notification for trade closed
+            if self._telegram_bot and not trade.is_paper:
+                try:
+                    duration = ''
+                    if trade.entry_time:
+                        dt = datetime.utcnow() - trade.entry_time
+                        hours = dt.total_seconds() / 3600
+                        duration = f"{hours:.1f}h"
+                    self._telegram_bot.notify_trade_closed({
+                        'symbol': trade.symbol,
+                        'pnl_percent': outcome['pnl_percent'],
+                        'outcome': 'WIN' if outcome['was_correct'] else 'LOSS',
+                        'duration': duration,
+                    })
+                except Exception as tg_err:
+                    logger.debug(f"Telegram trade-close notification failed: {tg_err}")
 
             # If retraining triggered, actually execute it
             if outcome.get('should_retrain'):
