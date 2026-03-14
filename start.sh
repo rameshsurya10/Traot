@@ -2,10 +2,14 @@
 # Traot — Start/Restart Script
 # Ensures only ONE instance runs at a time.
 
-PIDFILE="/root/Traot/data/traot.pid"
-LOGFILE="/root/Traot/data/trading.log"
-PYTHON="/root/Traot/venv/bin/python3"
-SCRIPT="/root/Traot/run_trading.py"
+# Resolve project directory (where this script lives)
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+PIDFILE="$DIR/data/traot.pid"
+LOGFILE="$DIR/data/trading.log"
+PYTHON="$DIR/venv/bin/python3"
+SCRIPT="$DIR/run_trading.py"
 
 # Kill any existing instances
 if [ -f "$PIDFILE" ]; then
