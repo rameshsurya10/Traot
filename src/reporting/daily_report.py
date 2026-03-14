@@ -74,12 +74,31 @@ class DailyReportScheduler:
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._last_sent_date: Optional[str] = None
+        self._sent_file = os.path.join(os.path.dirname(db_path), '.report_last_sent')
+        self._last_sent_date: Optional[str] = self._load_last_sent()
 
         if not self._smtp_user or not self._smtp_password:
             if self._enabled:
                 logger.warning("Daily report enabled but SMTP_USER/SMTP_PASSWORD not set")
                 self._enabled = False
+
+    def _load_last_sent(self) -> Optional[str]:
+        """Load last sent date from file (survives restarts)."""
+        try:
+            if os.path.exists(self._sent_file):
+                with open(self._sent_file) as f:
+                    return f.read().strip() or None
+        except Exception:
+            pass
+        return None
+
+    def _save_last_sent(self, date_str: str):
+        """Persist last sent date to file."""
+        try:
+            with open(self._sent_file, 'w') as f:
+                f.write(date_str)
+        except Exception as e:
+            logger.debug(f"Could not save last sent date: {e}")
 
     @property
     def is_available(self) -> bool:
@@ -119,6 +138,7 @@ class DailyReportScheduler:
                 yesterday = now - timedelta(days=1)
                 self._send_report(yesterday.strftime('%Y-%m-%d'))
                 self._last_sent_date = today_str
+                self._save_last_sent(today_str)
                 logger.info("Catch-up report sent successfully")
         except Exception as e:
             logger.error(f"Catch-up report failed: {e}", exc_info=True)
@@ -137,6 +157,7 @@ class DailyReportScheduler:
                     yesterday = now - timedelta(days=1)
                     self._send_report(yesterday.strftime('%Y-%m-%d'))
                     self._last_sent_date = today_str
+                    self._save_last_sent(today_str)
             except Exception as e:
                 logger.error(f"Daily report scheduler error: {e}")
             self._stop_event.wait(60)
