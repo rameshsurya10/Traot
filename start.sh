@@ -22,15 +22,15 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$PIDFILE"
 fi
 
-# Also kill any stray processes
-pkill -9 -f "python3.*run_trading.py" 2>/dev/null
+# Also kill any stray python processes running run_trading
+pkill -9 -f "python3.*run_trading" 2>/dev/null
 sleep 3
 
-# Verify nothing is running
-RUNNING=$(pgrep -f "run_trading.py" | wc -l)
+# Verify no python instances of run_trading are running
+RUNNING=$(pgrep -f "python3.*run_trading" 2>/dev/null | wc -l)
 if [ "$RUNNING" -gt 0 ]; then
     echo "ERROR: Could not kill all instances. PIDs:"
-    pgrep -f "run_trading.py"
+    pgrep -f "python3.*run_trading"
     exit 1
 fi
 
