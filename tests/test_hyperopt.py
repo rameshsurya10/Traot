@@ -560,3 +560,275 @@ class TestOptimizer:
         trial.number = 0
         loss = objective(trial)
         assert loss == MAX_LOSS
+
+
+# ===================================================================
+# TestResults
+# ===================================================================
+
+import json
+import tempfile
+import os
+
+
+class TestResults:
+    """Tests for src/optimize/results.py."""
+
+    def test_save_best_result(self):
+        from src.optimize.results import save_best_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = {
+                "trial_number": 42,
+                "loss": -0.25,
+                "params": {"confidence_threshold": 0.78},
+                "optimization_metrics": {"win_rate": 0.65},
+            }
+            path = save_best_result(result, output_dir=tmpdir)
+            assert os.path.exists(path)
+            with open(path) as f:
+                saved = json.load(f)
+            assert saved["trial_number"] == 42
+
+    def test_save_best_result_creates_dir(self):
+        from src.optimize.results import save_best_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested = os.path.join(tmpdir, "nested", "deep")
+            path = save_best_result({"test": 1}, output_dir=nested)
+            assert os.path.exists(path)
+
+    def test_load_latest_result(self):
+        from src.optimize.results import save_best_result, load_latest_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_best_result({"trial": 1}, output_dir=tmpdir)
+            result = load_latest_result(output_dir=tmpdir)
+            assert result["trial"] == 1
+
+    def test_load_latest_result_empty_dir(self):
+        from src.optimize.results import load_latest_result
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = load_latest_result(output_dir=tmpdir)
+            assert result == {}
+
+    def test_load_latest_result_nonexistent_dir(self):
+        from src.optimize.results import load_latest_result
+
+        result = load_latest_result(output_dir="/nonexistent/path")
+        assert result == {}
+
+    def test_export_trials_csv(self):
+        from src.optimize.results import export_trials_csv
+        import optuna
+
+        study = optuna.create_study()
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"x": 1.0},
+                values=[0.5],
+                distributions={
+                    "x": optuna.distributions.FloatDistribution(0, 2)
+                },
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = export_trials_csv(study, output_dir=tmpdir)
+            assert os.path.exists(path)
+            assert path.endswith(".csv")
+            # Verify content
+            df = pd.read_csv(path)
+            assert len(df) == 1
+            assert "param_x" in df.columns
+
+    def test_format_results_table(self):
+        from src.optimize.results import format_results_table
+        import optuna
+
+        study = optuna.create_study(direction="minimize")
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"x": 1.0},
+                values=[-0.5],
+                distributions={
+                    "x": optuna.distributions.FloatDistribution(0, 2)
+                },
+                user_attrs={
+                    "total_trades": 50,
+                    "win_rate": 0.65,
+                    "total_pnl_percent": 7.43,
+                    "max_drawdown": 4.1,
+                },
+            )
+        )
+        table = format_results_table(study, top_n=5)
+        assert "Trial" in table
+        assert "Loss" in table
+        # Should contain the trial data
+        assert "-0.5000" in table
+
+    def test_param_registry_populated(self):
+        from src.optimize.results import PARAM_REGISTRY
+
+        assert len(PARAM_REGISTRY) == 20  # 10 trading + 6 ensemble + 4 risk
+        assert "confidence_threshold" in PARAM_REGISTRY
+        assert PARAM_REGISTRY["confidence_threshold"] == "continuous_learning.confidence.trading_threshold"
+
+
+# ===================================================================
+# TestCLI
+# ===================================================================
+
+
+class TestCLI:
+    """Tests for src/optimize/hyperopt.py CLI argument parser."""
+
+    def test_parse_args_defaults(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args([])
+        assert args.trials == 300
+        assert args.loss == "traot"
+        assert args.space == "trading"
+        assert args.patience == 50
+        assert args.config == "config.yaml"
+        assert args.dry_run is False
+        assert args.apply_best is False
+        assert args.show_best is None
+        assert args.resume is False
+        assert args.download is False
+        assert args.seed is None
+
+    def test_parse_args_custom(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args([
+            "--trials", "500",
+            "--loss", "sharpe",
+            "--space", "trading,ensemble",
+            "--seed", "42",
+        ])
+        assert args.trials == 500
+        assert args.loss == "sharpe"
+        assert args.space == "trading,ensemble"
+        assert args.seed == 42
+
+    def test_parse_args_dry_run(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--dry-run"])
+        assert args.dry_run is True
+
+    def test_parse_args_show_best(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--show-best", "10"])
+        assert args.show_best == 10
+
+    def test_parse_args_apply_best(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--apply-best"])
+        assert args.apply_best is True
+
+    def test_parse_args_resume(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--resume"])
+        assert args.resume is True
+
+    def test_parse_args_download_with_days(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--download", "--days", "180"])
+        assert args.download is True
+        assert args.days == 180
+
+    def test_parse_args_symbol_and_timeframe(self):
+        from src.optimize.hyperopt import parse_args
+
+        args = parse_args(["--symbol", "ETH/USDT", "--timeframe", "1h"])
+        assert args.symbol == "ETH/USDT"
+        assert args.timeframe == "1h"
+
+
+# ===================================================================
+# TestEarlyStopping
+# ===================================================================
+
+
+class TestEarlyStopping:
+    """Tests for the EarlyStoppingCallback."""
+
+    def test_early_stopping_triggers(self):
+        from src.optimize.hyperopt import EarlyStoppingCallback
+        import optuna
+
+        callback = EarlyStoppingCallback(patience=3)
+        study = optuna.create_study(direction="minimize")
+
+        # Add trials with no improvement — catch RuntimeError from study.stop()
+        # which can only be called inside an optimize loop
+        for i in range(5):
+            study.add_trial(
+                optuna.trial.create_trial(
+                    params={"x": float(i)},
+                    values=[1.0],  # Same value every time
+                    distributions={
+                        "x": optuna.distributions.FloatDistribution(0, 10)
+                    },
+                )
+            )
+            try:
+                callback(study, study.trials[-1])
+            except RuntimeError:
+                pass  # study.stop() raises outside optimize loop
+
+        assert callback._no_improve_count >= 3
+
+    def test_early_stopping_resets_on_improvement(self):
+        from src.optimize.hyperopt import EarlyStoppingCallback
+        import optuna
+
+        callback = EarlyStoppingCallback(patience=5)
+        study = optuna.create_study(direction="minimize")
+
+        # Add improving trial
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"x": 1.0},
+                values=[1.0],
+                distributions={
+                    "x": optuna.distributions.FloatDistribution(0, 10)
+                },
+            )
+        )
+        callback(study, study.trials[-1])
+        assert callback._no_improve_count == 0
+
+        # Add worse trial
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"x": 2.0},
+                values=[2.0],
+                distributions={
+                    "x": optuna.distributions.FloatDistribution(0, 10)
+                },
+            )
+        )
+        callback(study, study.trials[-1])
+        assert callback._no_improve_count == 1
+
+        # Add better trial — should reset
+        study.add_trial(
+            optuna.trial.create_trial(
+                params={"x": 0.5},
+                values=[0.5],
+                distributions={
+                    "x": optuna.distributions.FloatDistribution(0, 10)
+                },
+            )
+        )
+        callback(study, study.trials[-1])
+        assert callback._no_improve_count == 0
