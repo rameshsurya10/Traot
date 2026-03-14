@@ -376,3 +376,187 @@ class TestEngineIntegration:
         engine = BacktestEngine(config_dict=raw)
         assert engine.config.signals.risk_per_trade == 0.03
         assert engine.config.signals.cooldown_minutes == 30
+
+
+# ===================================================================
+# TestOptimizer
+# ===================================================================
+
+import pandas as pd
+
+
+class TestOptimizer:
+    """Tests for src/optimize/optimizer.py."""
+
+    def test_create_objective_returns_callable(self):
+        """create_objective should return a callable."""
+        from src.optimize.optimizer import create_objective
+
+        objective = create_objective(
+            config_path="config.yaml",
+            loss_name="traot",
+            spaces=["trading"],
+        )
+        assert callable(objective)
+
+    def test_create_objective_with_preloaded_data(self):
+        """create_objective should accept a pre-loaded DataFrame."""
+        from src.optimize.optimizer import create_objective
+
+        df = pd.DataFrame({
+            "datetime": pd.date_range("2025-01-01", periods=2000, freq="15min"),
+            "open": [100.0] * 2000,
+            "high": [101.0] * 2000,
+            "low": [99.0] * 2000,
+            "close": [100.5] * 2000,
+            "volume": [1000.0] * 2000,
+        })
+        objective = create_objective(
+            config_path="config.yaml",
+            loss_name="traot",
+            spaces=["trading"],
+            data_df=df,
+        )
+        assert callable(objective)
+
+    def test_split_train_val(self):
+        """Train/val split should preserve total length."""
+        from src.optimize.optimizer import split_train_val
+
+        df = pd.DataFrame({"close": range(100)})
+        train, val = split_train_val(df, train_ratio=0.7)
+        assert len(train) == 70
+        assert len(val) == 30
+
+    def test_split_train_val_no_overlap(self):
+        """Train and val should not overlap."""
+        from src.optimize.optimizer import split_train_val
+
+        df = pd.DataFrame({"close": range(100)})
+        train, val = split_train_val(df, train_ratio=0.7)
+        assert train["close"].max() < val["close"].min()
+
+    def test_split_train_val_custom_ratio(self):
+        """Custom train ratio should work correctly."""
+        from src.optimize.optimizer import split_train_val
+
+        df = pd.DataFrame({"close": range(200)})
+        train, val = split_train_val(df, train_ratio=0.8)
+        assert len(train) == 160
+        assert len(val) == 40
+
+    def test_load_historical_data_fallback(self):
+        """Should generate synthetic data when no DB available."""
+        from src.optimize.optimizer import _load_historical_data
+
+        raw_config = {
+            "database": {"path": "nonexistent.db"},
+            "data": {"symbol": "TEST"},
+        }
+        df = _load_historical_data(raw_config)
+        assert len(df) == 2000
+        assert "datetime" in df.columns
+        assert "close" in df.columns
+        assert "open" in df.columns
+        assert "high" in df.columns
+        assert "low" in df.columns
+        assert "volume" in df.columns
+
+    def test_generate_synthetic_data_deterministic(self):
+        """Synthetic data with same seed should be identical."""
+        from src.optimize.optimizer import _generate_synthetic_data
+
+        df1 = _generate_synthetic_data(seed=42)
+        df2 = _generate_synthetic_data(seed=42)
+        pd.testing.assert_frame_equal(df1, df2)
+
+    def test_generate_synthetic_data_custom_size(self):
+        """Synthetic data generation should respect the n parameter."""
+        from src.optimize.optimizer import _generate_synthetic_data
+
+        df = _generate_synthetic_data(n=500)
+        assert len(df) == 500
+
+    def test_estimate_backtest_days_with_datetime(self):
+        """Should compute days from datetime column."""
+        from src.optimize.optimizer import _estimate_backtest_days
+
+        df = pd.DataFrame({
+            "datetime": pd.date_range("2025-01-01", periods=960, freq="15min"),
+        })
+        days = _estimate_backtest_days(df)
+        assert 9.0 <= days <= 11.0  # ~10 days of 15-min candles
+
+    def test_estimate_backtest_days_no_datetime(self):
+        """Should fall back to heuristic when no datetime column."""
+        from src.optimize.optimizer import _estimate_backtest_days
+
+        df = pd.DataFrame({"close": range(960)})
+        days = _estimate_backtest_days(df)
+        assert days == 10.0  # 960 / 96
+
+    def test_estimate_backtest_days_empty_df(self):
+        """Should return 30 for empty DataFrame."""
+        from src.optimize.optimizer import _estimate_backtest_days
+
+        df = pd.DataFrame()
+        days = _estimate_backtest_days(df)
+        assert days == 30.0
+
+    def test_estimate_backtest_days_none(self):
+        """Should return 30 for None input."""
+        from src.optimize.optimizer import _estimate_backtest_days
+
+        days = _estimate_backtest_days(None)
+        assert days == 30.0
+
+    def test_apply_normalized_ensemble(self):
+        """Normalized ensemble weights should be written into config."""
+        from src.optimize.optimizer import _apply_normalized_ensemble
+
+        config = {}
+        params = {
+            "weight_lstm": 0.55,
+            "weight_fourier": 0.10,
+            "weight_kalman": 0.15,
+            "weight_markov": 0.10,
+            "weight_entropy": 0.05,
+            "weight_monte_carlo": 0.05,
+        }
+        _apply_normalized_ensemble(config, params)
+        weights = config["prediction"]["ensemble"]["weights"]
+        assert "lstm" in weights
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_apply_normalized_ensemble_no_weight_params(self):
+        """Should be a no-op when no weight_ params are present."""
+        from src.optimize.optimizer import _apply_normalized_ensemble
+
+        config = {}
+        _apply_normalized_ensemble(config, {"confidence_threshold": 0.8})
+        assert config == {}
+
+    def test_objective_returns_max_loss_on_failure(self):
+        """Objective should return MAX_LOSS when the trial fails."""
+        from src.optimize.optimizer import create_objective
+        from src.optimize.loss_functions import MAX_LOSS
+
+        # Create objective with data that's too short for BacktestEngine
+        short_df = pd.DataFrame({
+            "datetime": pd.date_range("2025-01-01", periods=50, freq="15min"),
+            "open": [100.0] * 50,
+            "high": [101.0] * 50,
+            "low": [99.0] * 50,
+            "close": [100.5] * 50,
+            "volume": [1000.0] * 50,
+        })
+        objective = create_objective(
+            config_path="config.yaml",
+            loss_name="traot",
+            spaces=["trading"],
+            data_df=short_df,
+        )
+        trial = FakeTrial()
+        trial.number = 0
+        loss = objective(trial)
+        assert loss == MAX_LOSS
