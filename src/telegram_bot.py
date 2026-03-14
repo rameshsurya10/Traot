@@ -314,7 +314,14 @@ class TelegramBot:
         else:
             emoji = "\u274c"     # cross for losses
 
-        outcome = "WIN" if was_correct == 1 else ("LOSS" if was_correct == 0 else "CLOSED")
+        # Support both 'was_correct' (int from DB) and 'outcome' (str from bridge)
+        raw_outcome = trade.get('outcome', '')
+        if was_correct == 1 or raw_outcome == 'WIN':
+            outcome = "WIN"
+        elif was_correct == 0 or raw_outcome == 'LOSS':
+            outcome = "LOSS"
+        else:
+            outcome = "CLOSED"
 
         lines = [
             f"{emoji} <b>Trade Closed — {outcome}</b>",
