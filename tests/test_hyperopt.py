@@ -320,3 +320,59 @@ class TestLossFunctions:
         # max_dd_param=10 < 20, so ceiling is 10 -> 12 > 10 -> killed
         loss = compute_loss(m, "traot", backtest_days=30, max_dd_param=10)
         assert loss == MAX_LOSS
+
+
+# ===================================================================
+# TestEngineIntegration
+# ===================================================================
+
+class TestEngineIntegration:
+    """Tests for BacktestEngine hyperopt compatibility (config_dict, copy)."""
+
+    def test_engine_accepts_config_dict(self):
+        """BacktestEngine can be created with a raw config dict."""
+        from src.backtesting.engine import BacktestEngine
+        import yaml
+
+        with open('config.yaml') as f:
+            raw = yaml.safe_load(f)
+
+        engine = BacktestEngine(config_dict=raw)
+        assert engine.config is not None
+        assert engine.config.raw == raw
+
+    def test_engine_accepts_preloaded_df(self):
+        """BacktestEngine can load data without copying."""
+        from src.backtesting.engine import BacktestEngine
+        import pandas as pd
+
+        engine = BacktestEngine(config_path='config.yaml')
+        df = pd.DataFrame({
+            'datetime': pd.date_range('2025-01-01', periods=300, freq='15min'),
+            'open': [100.0] * 300,
+            'high': [101.0] * 300,
+            'low': [99.0] * 300,
+            'close': [100.5] * 300,
+            'volume': [1000.0] * 300,
+        })
+        result = engine.load_data(df=df, copy=False)
+        assert result is True
+
+    def test_config_dict_overrides_signals(self):
+        """Config dict should override signal config values."""
+        from src.backtesting.engine import BacktestEngine
+        import yaml
+
+        with open('config.yaml') as f:
+            raw = yaml.safe_load(f)
+
+        raw['signals'] = {
+            'risk_per_trade': 0.03,
+            'risk_reward_ratio': 3.0,
+            'strong_signal': 0.70,
+            'medium_signal': 0.60,
+            'cooldown_minutes': 30,
+        }
+        engine = BacktestEngine(config_dict=raw)
+        assert engine.config.signals.risk_per_trade == 0.03
+        assert engine.config.signals.cooldown_minutes == 30

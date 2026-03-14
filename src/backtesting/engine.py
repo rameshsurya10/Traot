@@ -425,9 +425,33 @@ class BacktestEngine:
     def __init__(
         self,
         config_path: str = "config.yaml",
-        backtest_config: Optional[BacktestConfig] = None
+        backtest_config: Optional[BacktestConfig] = None,
+        config_dict: Optional[dict] = None,
     ):
-        self.config = Config.load(config_path)
+        if config_dict is not None:
+            self.config = Config.load(config_path)
+            self.config.raw = config_dict
+            # Override typed fields that the backtest engine uses
+            signals = config_dict.get('signals', {})
+            if signals:
+                from src.core.config import SignalConfig
+                self.config.signals = SignalConfig(
+                    risk_per_trade=signals.get('risk_per_trade', 0.02),
+                    risk_reward_ratio=signals.get('risk_reward_ratio', 2.0),
+                    strong_signal=signals.get('strong_signal', 0.65),
+                    medium_signal=signals.get('medium_signal', 0.55),
+                    cooldown_minutes=signals.get('cooldown_minutes', 60),
+                )
+            analysis = config_dict.get('analysis', {})
+            if analysis:
+                from src.core.config import AnalysisConfig
+                self.config.analysis = AnalysisConfig(
+                    update_interval=analysis.get('update_interval', 60),
+                    min_confidence=analysis.get('min_confidence', 0.55),
+                    lookback_period=analysis.get('lookback_period', 100),
+                )
+        else:
+            self.config = Config.load(config_path)
         self.bt_config = backtest_config or BacktestConfig()
 
         # Brokerage
@@ -441,10 +465,10 @@ class BacktestEngine:
         self.df: Optional[pd.DataFrame] = None
         self.current_index: int = 0
 
-    def load_data(self, df: Optional[pd.DataFrame] = None) -> bool:
+    def load_data(self, df: Optional[pd.DataFrame] = None, copy: bool = True) -> bool:
         """Load historical data for backtesting."""
         if df is not None:
-            self.df = df.copy()
+            self.df = df.copy() if copy else df
         else:
             from src.data_service import DataService
             data_service = DataService()
