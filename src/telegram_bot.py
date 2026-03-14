@@ -24,8 +24,9 @@ Commands:
 
 import asyncio
 import logging
+import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional
 
@@ -40,6 +41,8 @@ from telegram.ext import (
 
 logger = logging.getLogger(__name__)
 
+MAX_MESSAGE_LENGTH = 4096
+
 
 def authorized_only(func):
     """Decorator: reject commands from unauthorized users."""
@@ -49,7 +52,7 @@ def authorized_only(func):
             logger.warning(
                 f"Unauthorized access attempt from chat_id={update.effective_chat.id}"
             )
-            return  # Silent ignore — no response to prevent enumeration
+            return
         return await func(self, update, context)
     return wrapper
 
@@ -73,12 +76,18 @@ class TelegramBot:
         self._token = token
         self._chat_id = str(chat_id)
         self._runner = runner
-        self._database = database
         self._config = config or {}
         self._app: Optional[Application] = None
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
+        self._db_path = self._config.get('database', {}).get('path', 'data/trading.db')
+
+    def _get_db_connection(self) -> sqlite3.Connection:
+        """Get a read-only database connection with WAL mode."""
+        conn = self._get_db_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
 
     def _is_authorized(self, update: Update) -> bool:
         """Check if the message sender is the authorized user."""
@@ -181,7 +190,7 @@ class TelegramBot:
         try:
             await self._app.bot.send_message(
                 chat_id=self._chat_id,
-                text="Traot Trading Bot is online.\nType /help for commands.",
+                text="\u2705 Traot Trading Bot is online.\nType /help for commands.",
             )
         except Exception as e:
             logger.error(f"Failed to send startup message: {e}")
@@ -208,17 +217,37 @@ class TelegramBot:
     # =========================================================================
 
     async def _send_message(self, text: str, parse_mode: str = "HTML"):
-        """Send a message to the authorized user."""
+        """Send a message to the authorized user, splitting if too long."""
         if not self._app or not self._app.bot:
             return
         try:
-            await self._app.bot.send_message(
-                chat_id=self._chat_id,
-                text=text,
-                parse_mode=parse_mode,
-            )
+            # Split long messages at newline boundaries
+            if len(text) <= MAX_MESSAGE_LENGTH:
+                await self._app.bot.send_message(
+                    chat_id=self._chat_id, text=text, parse_mode=parse_mode,
+                )
+            else:
+                chunks = self._split_message(text)
+                for chunk in chunks:
+                    await self._app.bot.send_message(
+                        chat_id=self._chat_id, text=chunk, parse_mode=parse_mode,
+                    )
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
+
+    @staticmethod
+    def _split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list:
+        """Split a long message at newline boundaries."""
+        chunks = []
+        while len(text) > max_len:
+            split_at = text.rfind('\n', 0, max_len)
+            if split_at == -1:
+                split_at = max_len
+            chunks.append(text[:split_at])
+            text = text[split_at:].lstrip('\n')
+        if text:
+            chunks.append(text)
+        return chunks
 
     def send_notification(self, text: str):
         """Thread-safe notification sender (called from trading threads)."""
@@ -234,43 +263,77 @@ class TelegramBot:
 
     def notify_trade_opened(self, trade: dict):
         """Send trade opened notification."""
-        direction = trade.get('direction', 'UNKNOWN')
+        direction = trade.get('predicted_direction', trade.get('direction', 'UNKNOWN'))
         symbol = trade.get('symbol', '?')
         entry = trade.get('entry_price', 0)
         sl = trade.get('stop_loss', 0)
         tp = trade.get('take_profit', 0)
-        conf = trade.get('confidence', 0)
+        conf = trade.get('predicted_confidence', trade.get('confidence', 0))
+        interval = trade.get('interval', '')
 
         emoji = "\U0001f7e2" if direction == 'BUY' else "\U0001f534"
-        msg = (
-            f"{emoji} <b>Trade Opened</b>\n\n"
-            f"<b>Pair:</b> {symbol}\n"
-            f"<b>Direction:</b> {direction}\n"
-            f"<b>Entry:</b> ${entry:,.4f}\n"
-            f"<b>Stop Loss:</b> ${sl:,.4f}\n"
-            f"<b>Take Profit:</b> ${tp:,.4f}\n"
-            f"<b>Confidence:</b> {conf:.1%}\n"
-            f"<b>Time:</b> {datetime.utcnow().strftime('%H:%M:%S')} UTC"
-        )
-        self.send_notification(msg)
+        now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
+
+        lines = [
+            f"{emoji} <b>Trade Opened</b>",
+            "",
+            f"<b>Pair:</b> {symbol}",
+            f"<b>Direction:</b> {direction}",
+            f"<b>Entry:</b> ${entry:,.4f}",
+        ]
+        if sl:
+            lines.append(f"<b>Stop Loss:</b> ${sl:,.4f}")
+        if tp:
+            lines.append(f"<b>Take Profit:</b> ${tp:,.4f}")
+        lines.append(f"<b>Confidence:</b> {conf:.1%}")
+        if interval:
+            lines.append(f"<b>Timeframe:</b> {interval}")
+        lines.append(f"<b>Time:</b> {now_utc} UTC")
+
+        self.send_notification('\n'.join(lines))
 
     def notify_trade_closed(self, trade: dict):
         """Send trade closed notification."""
         symbol = trade.get('symbol', '?')
-        pnl = trade.get('pnl_percent', 0)
-        outcome = trade.get('outcome', 'UNKNOWN')
-        duration = trade.get('duration', '?')
+        pnl = trade.get('pnl_percent', 0) or 0
+        was_correct = trade.get('was_correct')
+        direction = trade.get('predicted_direction', trade.get('direction', '?'))
+        entry_price = trade.get('entry_price', 0)
+        exit_price = trade.get('exit_price', 0)
+        closed_by = trade.get('closed_by', '')
+        duration = trade.get('duration', '')
+        now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
 
-        emoji = "\u2705" if pnl >= 0 else "\u274c"
-        msg = (
-            f"{emoji} <b>Trade Closed</b>\n\n"
-            f"<b>Pair:</b> {symbol}\n"
-            f"<b>Outcome:</b> {outcome}\n"
-            f"<b>P&L:</b> {pnl:+.2f}%\n"
-            f"<b>Duration:</b> {duration}\n"
-            f"<b>Time:</b> {datetime.utcnow().strftime('%H:%M:%S')} UTC"
-        )
-        self.send_notification(msg)
+        # Freqtrade-style emoji
+        if pnl >= 5.0:
+            emoji = "\U0001f680"  # rocket for big wins
+        elif pnl > 0:
+            emoji = "\u2705"     # checkmark for small wins
+        elif closed_by and 'stop' in closed_by.lower():
+            emoji = "\u26a0\ufe0f"  # warning for stop-loss
+        else:
+            emoji = "\u274c"     # cross for losses
+
+        outcome = "WIN" if was_correct == 1 else ("LOSS" if was_correct == 0 else "CLOSED")
+
+        lines = [
+            f"{emoji} <b>Trade Closed — {outcome}</b>",
+            "",
+            f"<b>Pair:</b> {symbol}",
+            f"<b>Direction:</b> {direction}",
+            f"<b>P&L:</b> {pnl:+.3f}%",
+        ]
+        if entry_price:
+            lines.append(f"<b>Entry:</b> ${entry_price:,.4f}")
+        if exit_price:
+            lines.append(f"<b>Exit:</b> ${exit_price:,.4f}")
+        if closed_by:
+            lines.append(f"<b>Exit Reason:</b> {closed_by}")
+        if duration:
+            lines.append(f"<b>Duration:</b> {duration}")
+        lines.append(f"<b>Time:</b> {now_utc} UTC")
+
+        self.send_notification('\n'.join(lines))
 
     def notify_daily_summary(self, summary: dict):
         """Send daily P&L summary."""
@@ -281,13 +344,14 @@ class TelegramBot:
         losers = summary.get('losers', 0)
 
         emoji = "\U0001f4c8" if total_pnl >= 0 else "\U0001f4c9"
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         msg = (
             f"{emoji} <b>Daily Summary</b>\n\n"
             f"<b>P&L:</b> {total_pnl:+.2f}%\n"
             f"<b>Trades:</b> {trade_count}\n"
             f"<b>Win Rate:</b> {win_rate:.0%}\n"
             f"<b>W/L:</b> {winners}/{losers}\n"
-            f"<b>Date:</b> {datetime.utcnow().strftime('%Y-%m-%d')}"
+            f"<b>Date:</b> {today}"
         )
         self.send_notification(msg)
 
@@ -349,12 +413,19 @@ class TelegramBot:
             portfolio = status.get('portfolio', {})
             learning = status.get('continuous_learning', {})
 
-            # Truncate uptime to hours:minutes
+            # Format uptime to hours:minutes
             if uptime and uptime != 'N/A':
                 uptime = uptime.split('.')[0]
 
+            # State emoji
+            state_emoji = {
+                'running': '\u2705', 'paused': '\u23f8\ufe0f',
+                'starting': '\u23f3', 'stopped': '\u26d4',
+                'error': '\u274c',
+            }.get(state, '\u2753')
+
             msg = (
-                f"<b>Traot Status</b>\n\n"
+                f"{state_emoji} <b>Traot Status</b>\n\n"
                 f"<b>State:</b> {state}\n"
                 f"<b>Mode:</b> {mode}\n"
                 f"<b>Uptime:</b> {uptime}\n"
@@ -367,10 +438,12 @@ class TelegramBot:
             if portfolio:
                 total_val = portfolio.get('total_value', 0)
                 positions = portfolio.get('position_count', 0)
+                unrealized = portfolio.get('unrealized_pnl', 0)
                 msg += (
                     f"\n<b>Portfolio:</b>\n"
                     f"  Value: ${total_val:,.2f}\n"
                     f"  Positions: {positions}\n"
+                    f"  Unrealized P&L: ${unrealized:,.2f}\n"
                 )
 
             if learning:
@@ -382,10 +455,24 @@ class TelegramBot:
                     f"  Confidence: {conf:.1%}\n"
                 )
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+            # Show open holdings
+            try:
+                holdings = self._runner.get_holdings()
+                if holdings:
+                    msg += "\n<b>Open Positions:</b>\n"
+                    for h in holdings[:10]:
+                        sym = h.get('symbol', '?')
+                        qty = h.get('quantity', 0)
+                        pnl_pct = h.get('unrealized_pnl_pct', 0)
+                        pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+                        msg += f"  {pnl_emoji} {sym}: {qty:.4f} ({pnl_pct:+.2f}%)\n"
+            except Exception:
+                pass
+
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/status error: {e}")
+            logger.error(f"/status error: {e}", exc_info=True)
             await update.message.reply_text("Error fetching status. Check server logs.")
 
     @authorized_only
@@ -399,20 +486,28 @@ class TelegramBot:
             winners = stats['winners']
             losers = stats['losers']
             avg_pnl = stats['avg_pnl']
+            best_trade = stats.get('best_trade', 0)
+            worst_trade = stats.get('worst_trade', 0)
+
+            if total == 0:
+                await update.message.reply_text("No closed trades yet.")
+                return
 
             emoji = "\U0001f4c8" if total_pnl >= 0 else "\U0001f4c9"
             msg = (
                 f"{emoji} <b>Profit Summary</b>\n\n"
-                f"<b>Total P&L:</b> {total_pnl:+.2f}%\n"
+                f"<b>Total P&L:</b> {total_pnl:+.3f}%\n"
                 f"<b>Win Rate:</b> {win_rate:.0%}\n"
                 f"<b>Trades:</b> {total}\n"
                 f"<b>W/L:</b> {winners}/{losers}\n"
-                f"<b>Avg P&L:</b> {avg_pnl:+.2f}%"
+                f"<b>Avg P&L:</b> {avg_pnl:+.3f}%\n"
+                f"<b>Best:</b> {best_trade:+.3f}%\n"
+                f"<b>Worst:</b> {worst_trade:+.3f}%"
             )
             await update.message.reply_text(msg, parse_mode="HTML")
 
         except Exception as e:
-            logger.error(f"/profit error: {e}")
+            logger.error(f"/profit error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -422,7 +517,7 @@ class TelegramBot:
             stats = self._get_period_stats(days=1, label="Today")
             await update.message.reply_text(stats, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"/daily error: {e}")
+            logger.error(f"/daily error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -432,7 +527,7 @@ class TelegramBot:
             stats = self._get_period_stats(days=7, label="This Week")
             await update.message.reply_text(stats, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"/weekly error: {e}")
+            logger.error(f"/weekly error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -442,204 +537,310 @@ class TelegramBot:
             stats = self._get_period_stats(days=30, label="This Month")
             await update.message.reply_text(stats, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"/monthly error: {e}")
+            logger.error(f"/monthly error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Portfolio value and positions."""
-        if not self._runner or not self._runner._portfolio:
-            await update.message.reply_text("Portfolio not available.")
+        if not self._runner:
+            await update.message.reply_text("Runner not connected.")
             return
 
         try:
-            summary = self._runner._portfolio.get_summary()
+            portfolio = getattr(self._runner, '_portfolio', None)
+            if not portfolio:
+                await update.message.reply_text("Portfolio not available.")
+                return
+
+            summary = portfolio.get_summary()
             total = summary.get('total_value', 0)
             cash = summary.get('cash', 0)
             positions = summary.get('position_count', 0)
-            holdings = self._runner.get_holdings()
+            unrealized = summary.get('unrealized_pnl', 0)
+            realized = summary.get('realized_pnl', 0)
+            total_return = summary.get('total_return_pct', 0)
 
             msg = (
-                f"<b>Balance</b>\n\n"
+                f"\U0001f4b0 <b>Balance</b>\n\n"
                 f"<b>Total Value:</b> ${total:,.2f}\n"
                 f"<b>Cash:</b> ${cash:,.2f}\n"
                 f"<b>Positions:</b> {positions}\n"
+                f"<b>Unrealized P&L:</b> ${unrealized:,.2f}\n"
+                f"<b>Realized P&L:</b> ${realized:,.2f}\n"
+                f"<b>Total Return:</b> {total_return:+.2f}%\n"
             )
 
+            holdings = self._runner.get_holdings()
             if holdings:
                 msg += "\n<b>Holdings:</b>\n"
                 for h in holdings[:10]:
                     sym = h.get('symbol', '?')
                     qty = h.get('quantity', 0)
-                    val = h.get('value', 0)
-                    pnl = h.get('unrealized_pnl', 0)
-                    msg += f"  {sym}: {qty:.4f} (${val:,.2f}, {pnl:+.2f}%)\n"
+                    val = h.get('holdings_value', 0)
+                    pnl_pct = h.get('unrealized_pnl_pct', 0)
+                    pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+                    msg += f"  {pnl_emoji} {sym}: {qty:.4f} (${val:,.2f}, {pnl_pct:+.2f}%)\n"
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+                if len(holdings) > 10:
+                    msg += f"  ... and {len(holdings) - 10} more\n"
+
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/balance error: {e}")
+            logger.error(f"/balance error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
     async def _cmd_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Per-pair win rate and profit."""
-        if not self._database:
-            await update.message.reply_text("Database not connected.")
-            return
-
+        """Per-pair win rate and profit from database."""
         try:
-            symbols = self._get_symbols()
-            if not symbols:
-                await update.message.reply_text("No symbols configured.")
+            conn = self._get_db_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT symbol,
+                           COUNT(*) as cnt,
+                           SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) as wins,
+                           AVG(pnl_percent) as avg_pnl,
+                           SUM(pnl_percent) as total_pnl,
+                           AVG(predicted_confidence) as avg_conf
+                    FROM trade_outcomes
+                    WHERE was_correct IS NOT NULL
+                      AND COALESCE(is_paper_trade, 0) = 0
+                      AND COALESCE(is_replay, 0) = 0
+                    GROUP BY symbol
+                    ORDER BY total_pnl DESC
+                ''')
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
+
+            if not rows:
+                await update.message.reply_text("No closed trades yet.")
                 return
 
-            msg = "<b>Per-Pair Performance</b>\n\n"
-
-            for symbol in symbols:
-                outcomes = self._database.get_recent_outcomes(symbol, limit=1000)
-                if not outcomes:
-                    msg += f"<b>{symbol}:</b> No trades\n"
-                    continue
-
-                wins = sum(1 for o in outcomes if o.get('was_correct'))
-                total = len(outcomes)
-                wr = wins / total if total > 0 else 0
-                pnl_vals = [
-                    o.get('pnl_percent', 0) for o in outcomes
-                    if o.get('pnl_percent') is not None
-                ]
-                total_pnl = sum(pnl_vals)
+            msg = "\U0001f4ca <b>Per-Pair Performance</b>\n\n"
+            for r in rows:
+                symbol = r['symbol']
+                cnt = r['cnt']
+                wins = r['wins']
+                wr = (wins / cnt * 100) if cnt > 0 else 0
+                total_pnl = r['total_pnl'] or 0
+                avg_conf = r['avg_conf'] or 0
 
                 emoji = "\u2705" if total_pnl >= 0 else "\u274c"
                 msg += (
-                    f"{emoji} <b>{symbol}:</b> "
-                    f"WR {wr:.0%} | "
-                    f"P&L {total_pnl:+.2f}% | "
-                    f"{total} trades\n"
+                    f"{emoji} <b>{symbol}</b>\n"
+                    f"  Trades: {cnt} | WR: {wr:.0f}% | P&L: {total_pnl:+.3f}%\n"
+                    f"  Avg Conf: {avg_conf:.1%}\n\n"
                 )
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/performance error: {e}")
+            logger.error(f"/performance error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
     async def _cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Recent 10 trades."""
-        if not self._database:
-            await update.message.reply_text("Database not connected.")
-            return
-
+        """Recent 10 trades with details."""
         try:
-            trades = self._get_all_recent_trades(limit=10)
+            conn = self._get_db_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT symbol, predicted_direction, pnl_percent, was_correct,
+                           entry_price, exit_price, entry_time, exit_time,
+                           interval, predicted_confidence, closed_by
+                    FROM trade_outcomes
+                    WHERE COALESCE(is_paper_trade, 0) = 0
+                      AND COALESCE(is_replay, 0) = 0
+                    ORDER BY COALESCE(exit_time, entry_time) DESC
+                    LIMIT 10
+                ''')
+                trades = [dict(row) for row in cursor.fetchall()]
+            finally:
+                conn.close()
+
             if not trades:
                 await update.message.reply_text("No trades found.")
                 return
 
-            msg = "<b>Recent Trades</b>\n\n"
+            msg = "\U0001f4dc <b>Recent Trades</b>\n\n"
             for t in trades:
                 sym = t.get('symbol', '?')
-                direction = t.get('direction', '?')
-                pnl = t.get('pnl_percent', 0) or 0
-                outcome = "\u2705" if t.get('was_correct') else "\u274c"
-                entry_time = t.get('entry_time', '?')
-                if isinstance(entry_time, str) and len(entry_time) > 16:
-                    entry_time = entry_time[:16]
+                direction = t.get('predicted_direction', '?')
+                pnl = t.get('pnl_percent')
+                was_correct = t.get('was_correct')
+                entry = t.get('entry_price') or 0
+                exit_p = t.get('exit_price')
+                entry_time = t.get('entry_time') or '?'
+                interval = t.get('interval') or ''
+                conf = t.get('predicted_confidence') or 0
+                closed_by = t.get('closed_by') or ''
+
+                # Format time
+                if isinstance(entry_time, str) and len(entry_time) >= 16:
+                    time_display = entry_time[5:16]  # MM-DD HH:MM
+                else:
+                    time_display = str(entry_time)
+
+                # Status
+                if was_correct is None:
+                    outcome_emoji = "\u23f3"  # hourglass = still open
+                    status = "OPEN"
+                    pnl_str = "—"
+                elif was_correct:
+                    outcome_emoji = "\u2705"
+                    status = "WIN"
+                    pnl_str = f"{pnl:+.3f}%" if pnl is not None else "—"
+                else:
+                    outcome_emoji = "\u274c"
+                    status = "LOSS"
+                    pnl_str = f"{pnl:+.3f}%" if pnl is not None else "—"
 
                 msg += (
-                    f"{outcome} {sym} {direction} "
-                    f"{pnl:+.2f}% ({entry_time})\n"
+                    f"{outcome_emoji} <b>{sym}</b> {direction} [{interval}]\n"
+                    f"  Entry: ${entry:,.2f}"
                 )
+                if exit_p:
+                    msg += f" → ${exit_p:,.2f}"
+                msg += f"\n  P&L: {pnl_str} | Conf: {conf:.0%}"
+                if closed_by:
+                    msg += f" | {closed_by}"
+                msg += f"\n  {time_display}\n\n"
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/trades error: {e}")
+            logger.error(f"/trades error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
     async def _cmd_confidence(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Current confidence levels per pair."""
-        if not self._database:
-            await update.message.reply_text("Database not connected.")
-            return
-
         try:
-            symbols = self._get_symbols()
-            msg = "<b>Confidence Levels</b>\n\n"
-
-            for symbol in symbols:
-                # Get latest confidence from history
-                with self._database.connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        SELECT confidence_score, mode, timestamp
+            conn = self._get_db_connection()
+            try:
+                cursor = conn.cursor()
+                # Get latest confidence per symbol+interval
+                cursor.execute('''
+                    SELECT ch.symbol, ch.confidence_score, ch.mode, ch.timestamp, ch.interval
+                    FROM confidence_history ch
+                    INNER JOIN (
+                        SELECT symbol, interval, MAX(timestamp) as max_ts
                         FROM confidence_history
-                        WHERE symbol = ?
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                    ''', (symbol,))
-                    row = cursor.fetchone()
+                        GROUP BY symbol, interval
+                    ) latest ON ch.symbol = latest.symbol
+                        AND ch.interval = latest.interval
+                        AND ch.timestamp = latest.max_ts
+                    ORDER BY ch.confidence_score DESC
+                ''')
+                rows = cursor.fetchall()
+            finally:
+                conn.close()
 
-                if row:
-                    conf = row['confidence_score']
-                    mode = row['mode']
-                    ts = row['timestamp']
-                    if isinstance(ts, str) and len(ts) > 16:
-                        ts = ts[:16]
+            if not rows:
+                await update.message.reply_text("No confidence data yet.")
+                return
 
-                    bar = self._confidence_bar(conf)
-                    msg += f"<b>{symbol}:</b> {conf:.1%} {bar} ({mode}) @ {ts}\n"
-                else:
-                    msg += f"<b>{symbol}:</b> No data\n"
+            msg = "\U0001f4ca <b>Confidence Levels</b>\n\n"
+            for row in rows:
+                symbol = row['symbol']
+                conf = row['confidence_score']
+                mode = row['mode']
+                ts = row['timestamp']
+                interval = row['interval'] or ''
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+                if isinstance(ts, str) and len(ts) >= 16:
+                    ts = ts[5:16]
+
+                bar = self._confidence_bar(conf)
+                mode_emoji = "\U0001f7e2" if mode == 'TRADING' else "\U0001f7e1"
+                msg += (
+                    f"{mode_emoji} <b>{symbol}</b> [{interval}]\n"
+                    f"  {conf:.1%} {bar}\n"
+                    f"  Mode: {mode} | Updated: {ts}\n\n"
+                )
+
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/confidence error: {e}")
+            logger.error(f"/confidence error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
     async def _cmd_learning(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Retraining history and model status."""
-        if not self._database:
-            await update.message.reply_text("Database not connected.")
-            return
-
         try:
-            symbols = self._get_symbols()
-            msg = "<b>Learning Status</b>\n\n"
+            conn = self._get_db_connection()
+            try:
+                cursor = conn.cursor()
 
-            for symbol in symbols:
-                history = self._database.get_retraining_history(symbol, limit=3)
-                if not history:
-                    msg += f"<b>{symbol}:</b> No retraining yet\n\n"
-                    continue
+                # Get latest learning state per symbol
+                cursor.execute('''
+                    SELECT ls.symbol, ls.interval, ls.mode, ls.confidence_score, ls.entered_at
+                    FROM learning_states ls
+                    INNER JOIN (
+                        SELECT symbol, interval, MAX(entered_at) as max_at
+                        FROM learning_states
+                        GROUP BY symbol, interval
+                    ) latest ON ls.symbol = latest.symbol
+                        AND ls.interval = latest.interval
+                        AND ls.entered_at = latest.max_at
+                    ORDER BY ls.symbol
+                ''')
+                states = cursor.fetchall()
 
-                msg += f"<b>{symbol}:</b>\n"
-                for h in history:
-                    triggered = h.get('triggered_at', '?')
-                    if isinstance(triggered, str) and len(triggered) > 16:
-                        triggered = triggered[:16]
-                    reason = h.get('trigger_reason', '?')
-                    status = h.get('status', '?')
-                    acc_before = h.get('accuracy_before')
-                    acc_after = h.get('accuracy_after')
+                # Get recent retraining events
+                cursor.execute('''
+                    SELECT symbol, interval, trigger_reason, status,
+                           validation_accuracy, duration_seconds, triggered_at
+                    FROM retraining_history
+                    ORDER BY triggered_at DESC
+                    LIMIT 10
+                ''')
+                retraining = cursor.fetchall()
+            finally:
+                conn.close()
 
-                    acc_str = ""
-                    if acc_before is not None and acc_after is not None:
-                        emoji = "\U0001f4c8" if acc_after > acc_before else "\U0001f4c9"
-                        acc_str = f" {emoji} {acc_before:.1%} -> {acc_after:.1%}"
+            msg = "\U0001f9e0 <b>Learning Status</b>\n\n"
 
-                    msg += f"  {triggered} | {reason} | {status}{acc_str}\n"
+            if states:
+                msg += "<b>Current Modes:</b>\n"
+                for s in states:
+                    mode = s['mode']
+                    mode_emoji = "\U0001f7e2" if mode == 'TRADING' else "\U0001f7e1"
+                    msg += (
+                        f"  {mode_emoji} {s['symbol']} [{s['interval']}]: "
+                        f"{mode} ({s['confidence_score']:.1%})\n"
+                    )
                 msg += "\n"
 
-            await update.message.reply_text(msg, parse_mode="HTML")
+            if retraining:
+                msg += "<b>Recent Retraining:</b>\n"
+                for r in retraining:
+                    status = r['status']
+                    s_emoji = "\u2705" if status == 'completed' else "\u274c"
+                    acc = f"{r['validation_accuracy']:.1%}" if r['validation_accuracy'] else "—"
+                    dur = f"{r['duration_seconds']:.0f}s" if r['duration_seconds'] else "—"
+                    triggered = r['triggered_at'] or '?'
+                    if isinstance(triggered, str) and len(triggered) >= 16:
+                        triggered = triggered[5:16]
+
+                    msg += (
+                        f"  {s_emoji} {r['symbol']}@{r['interval']}\n"
+                        f"    {r['trigger_reason']} | Acc: {acc} | {dur}\n"
+                        f"    {triggered}\n\n"
+                    )
+            elif not states:
+                msg += "No learning data yet."
+
+            await self._send_long_message(update, msg)
 
         except Exception as e:
-            logger.error(f"/learning error: {e}")
+            logger.error(f"/learning error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -666,7 +867,7 @@ class TelegramBot:
                     f"Cannot resume from state: {current.value}"
                 )
         except Exception as e:
-            logger.error(f"/start_trading error: {e}")
+            logger.error(f"/start_trading error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -694,7 +895,7 @@ class TelegramBot:
                     f"Cannot pause from state: {current.value}"
                 )
         except Exception as e:
-            logger.error(f"/stop_trading error: {e}")
+            logger.error(f"/stop_trading error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -706,15 +907,27 @@ class TelegramBot:
 
         args = context.args
         if not args:
-            await update.message.reply_text(
-                "Usage: /forceexit BTC/USDT\n"
-                "Specify the symbol to close."
-            )
+            # Show open positions to help user
+            try:
+                holdings = self._runner.get_holdings()
+                if holdings:
+                    symbols = [h.get('symbol', '?') for h in holdings]
+                    await update.message.reply_text(
+                        "Usage: /forceexit BTC/USDT\n\n"
+                        f"<b>Open positions:</b>\n" +
+                        "\n".join(f"  • {s}" for s in symbols),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await update.message.reply_text("No open positions.")
+            except Exception:
+                await update.message.reply_text(
+                    "Usage: /forceexit BTC/USDT\nSpecify the symbol to close."
+                )
             return
 
         symbol = args[0].upper()
         try:
-            # Check if we have a position in this symbol
             holdings = self._runner.get_holdings()
             position = next(
                 (h for h in holdings if h.get('symbol') == symbol), None
@@ -725,7 +938,6 @@ class TelegramBot:
                 )
                 return
 
-            # Request market sell via the runner
             if hasattr(self._runner, 'force_exit'):
                 self._runner.force_exit(symbol)
                 await update.message.reply_text(
@@ -733,11 +945,12 @@ class TelegramBot:
                 )
             else:
                 await update.message.reply_text(
-                    "Force exit not yet implemented in runner."
+                    f"\u26a0\ufe0f Force exit not yet implemented.\n"
+                    f"Please close {symbol} manually on the exchange."
                 )
 
         except Exception as e:
-            logger.error(f"/forceexit error: {e}")
+            logger.error(f"/forceexit error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -753,11 +966,19 @@ class TelegramBot:
                 await update.message.reply_text("No open positions.")
                 return
 
+            if not hasattr(self._runner, 'force_exit'):
+                symbols = [h.get('symbol', '?') for h in holdings]
+                await update.message.reply_text(
+                    "\u26a0\ufe0f Force exit not yet implemented.\n"
+                    f"Please close manually: {', '.join(symbols)}"
+                )
+                return
+
             closed = 0
             failed = 0
             for h in holdings:
                 symbol = h.get('symbol')
-                if symbol and hasattr(self._runner, 'force_exit'):
+                if symbol:
                     try:
                         self._runner.force_exit(symbol)
                         closed += 1
@@ -765,17 +986,13 @@ class TelegramBot:
                         logger.error(f"Force exit failed for {symbol}: {e}")
                         failed += 1
 
-            if closed > 0:
-                await update.message.reply_text(
-                    f"\u26a0\ufe0f Force exit requested for {closed} positions."
-                )
-            else:
-                await update.message.reply_text(
-                    "Force exit not yet implemented in runner."
-                )
+            msg = f"\u26a0\ufe0f Force exit requested for {closed} position(s)."
+            if failed:
+                msg += f"\n{failed} position(s) failed to close. Check logs."
+            await update.message.reply_text(msg)
 
         except Exception as e:
-            logger.error(f"/forceexit_all error: {e}")
+            logger.error(f"/forceexit_all error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -817,7 +1034,6 @@ class TelegramBot:
 
             await update.message.reply_text("Generating and sending daily report...")
 
-            # Run in thread to avoid blocking the bot
             import concurrent.futures
             loop = asyncio.get_running_loop()
             with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -826,11 +1042,11 @@ class TelegramBot:
                 )
 
             await update.message.reply_text(
-                "Daily report sent to your email.\n"
+                "\u2705 Daily report sent to your email.\n"
                 "Check your inbox (and spam folder)."
             )
         except Exception as e:
-            logger.error(f"/report error: {e}")
+            logger.error(f"/report error: {e}", exc_info=True)
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only
@@ -844,59 +1060,52 @@ class TelegramBot:
     # DATA HELPERS
     # =========================================================================
 
-    def _get_symbols(self) -> list:
-        """Get configured trading symbols."""
-        if self._runner and hasattr(self._runner, '_symbols'):
-            return list(self._runner._symbols.keys())
-        if self._config:
-            return self._config.get('symbols', [])
-        return []
-
     def _get_trade_stats(self, days: int = None) -> dict:
         """Get aggregated trade stats from database."""
-        if not self._database:
-            return {
-                'total_pnl': 0, 'win_rate': 0, 'total_trades': 0,
-                'winners': 0, 'losers': 0, 'avg_pnl': 0,
-            }
+        empty = {
+            'total_pnl': 0, 'win_rate': 0, 'total_trades': 0,
+            'winners': 0, 'losers': 0, 'avg_pnl': 0,
+            'best_trade': 0, 'worst_trade': 0,
+        }
 
-        cutoff = None
-        if days:
-            cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-
-        with self._database.connection() as conn:
+        conn = self._get_db_connection()
+        try:
             cursor = conn.cursor()
-            if cutoff:
+            if days:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
                 cursor.execute('''
-                    SELECT pnl_percent, was_correct, direction, symbol
+                    SELECT pnl_percent, was_correct
                     FROM trade_outcomes
                     WHERE exit_time >= ?
+                      AND was_correct IS NOT NULL
                       AND COALESCE(is_paper_trade, 0) = 0
                       AND COALESCE(is_replay, 0) = 0
                     ORDER BY exit_time DESC
                 ''', (cutoff,))
             else:
                 cursor.execute('''
-                    SELECT pnl_percent, was_correct, direction, symbol
+                    SELECT pnl_percent, was_correct
                     FROM trade_outcomes
-                    WHERE COALESCE(is_paper_trade, 0) = 0
+                    WHERE was_correct IS NOT NULL
+                      AND COALESCE(is_paper_trade, 0) = 0
                       AND COALESCE(is_replay, 0) = 0
                     ORDER BY exit_time DESC
                 ''')
 
             rows = cursor.fetchall()
+        finally:
+            conn.close()
 
         if not rows:
-            return {
-                'total_pnl': 0, 'win_rate': 0, 'total_trades': 0,
-                'winners': 0, 'losers': 0, 'avg_pnl': 0,
-            }
+            return empty
 
         winners = sum(1 for r in rows if r['was_correct'])
         losers = len(rows) - winners
         pnls = [r['pnl_percent'] for r in rows if r['pnl_percent'] is not None]
         total_pnl = sum(pnls)
         avg_pnl = total_pnl / len(pnls) if pnls else 0
+        best = max(pnls) if pnls else 0
+        worst = min(pnls) if pnls else 0
 
         return {
             'total_pnl': total_pnl,
@@ -905,6 +1114,8 @@ class TelegramBot:
             'winners': winners,
             'losers': losers,
             'avg_pnl': avg_pnl,
+            'best_trade': best,
+            'worst_trade': worst,
         }
 
     def _get_period_stats(self, days: int, label: str) -> str:
@@ -924,34 +1135,25 @@ class TelegramBot:
 
         return (
             f"{emoji} <b>{label}</b>\n\n"
-            f"<b>P&L:</b> {total_pnl:+.2f}%\n"
+            f"<b>P&L:</b> {total_pnl:+.3f}%\n"
             f"<b>Win Rate:</b> {win_rate:.0%}\n"
             f"<b>Trades:</b> {total}\n"
             f"<b>W/L:</b> {winners}/{losers}\n"
-            f"<b>Avg P&L:</b> {avg_pnl:+.2f}%"
+            f"<b>Avg P&L:</b> {avg_pnl:+.3f}%"
         )
 
-    def _get_all_recent_trades(self, limit: int = 10) -> list:
-        """Get recent trades across all symbols."""
-        if not self._database:
-            return []
-
-        with self._database.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT symbol, direction, pnl_percent, was_correct,
-                       entry_time, exit_time, interval
-                FROM trade_outcomes
-                WHERE COALESCE(is_paper_trade, 0) = 0
-                  AND COALESCE(is_replay, 0) = 0
-                ORDER BY exit_time DESC
-                LIMIT ?
-            ''', (limit,))
-            return [dict(row) for row in cursor.fetchall()]
+    async def _send_long_message(self, update: Update, text: str):
+        """Send a message, splitting if it exceeds Telegram's limit."""
+        if len(text) <= MAX_MESSAGE_LENGTH:
+            await update.message.reply_text(text, parse_mode="HTML")
+        else:
+            chunks = self._split_message(text)
+            for chunk in chunks:
+                await update.message.reply_text(chunk, parse_mode="HTML")
 
     @staticmethod
     def _confidence_bar(conf: float) -> str:
         """Render a visual confidence bar."""
-        filled = int(conf * 10)
+        filled = max(0, min(10, int(conf * 10)))
         empty = 10 - filled
         return "\u2588" * filled + "\u2591" * empty
