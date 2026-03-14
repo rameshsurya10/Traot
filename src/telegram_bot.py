@@ -19,6 +19,7 @@ Commands:
   /stop_trading        — Pause trading
   /forceexit <symbol>  — Close specific trade
   /forceexit_all       — Close all open trades
+  /report              — Send daily report email now
 """
 
 import asyncio
@@ -149,6 +150,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("stop_trading", self._cmd_stop_trading))
         self._app.add_handler(CommandHandler("forceexit", self._cmd_forceexit))
         self._app.add_handler(CommandHandler("forceexit_all", self._cmd_forceexit_all))
+        self._app.add_handler(CommandHandler("report", self._cmd_report))
 
         # Unknown command handler
         self._app.add_handler(
@@ -171,6 +173,7 @@ class TelegramBot:
             BotCommand("stop_trading", "Pause trading"),
             BotCommand("forceexit", "Close a trade"),
             BotCommand("forceexit_all", "Close all trades"),
+            BotCommand("report", "Send daily report email"),
             BotCommand("help", "Command reference"),
         ])
 
@@ -322,7 +325,8 @@ class TelegramBot:
             "/start_trading — Resume trading\n"
             "/stop_trading — Pause trading\n"
             "/forceexit &lt;SYMBOL&gt; — Close a trade\n"
-            "/forceexit_all — Close all trades",
+            "/forceexit_all — Close all trades\n"
+            "/report — Send daily report email now",
             parse_mode="HTML",
         )
 
@@ -772,6 +776,61 @@ class TelegramBot:
 
         except Exception as e:
             logger.error(f"/forceexit_all error: {e}")
+            await update.message.reply_text("An error occurred. Check server logs.")
+
+    @authorized_only
+    async def _cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Trigger the daily email report immediately."""
+        if not self._runner:
+            await update.message.reply_text("Runner not connected.")
+            return
+
+        try:
+            report_scheduler = getattr(self._runner, '_daily_report', None)
+            if not report_scheduler:
+                await update.message.reply_text(
+                    "Daily report scheduler not available.\n"
+                    "Check SMTP_USER and SMTP_PASSWORD in .env"
+                )
+                return
+
+            if not report_scheduler.is_available:
+                await update.message.reply_text(
+                    "Daily report disabled — SMTP credentials not configured.\n"
+                    "Set SMTP_USER and SMTP_PASSWORD in .env"
+                )
+                return
+
+            # Parse optional date argument (e.g., /report 2026-03-12)
+            date_str = None
+            if context.args:
+                raw_date = context.args[0]
+                try:
+                    datetime.strptime(raw_date, '%Y-%m-%d')
+                    date_str = raw_date
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid date format. Use YYYY-MM-DD.\n"
+                        "Example: /report 2026-03-12"
+                    )
+                    return
+
+            await update.message.reply_text("Generating and sending daily report...")
+
+            # Run in thread to avoid blocking the bot
+            import concurrent.futures
+            loop = asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                await loop.run_in_executor(
+                    pool, lambda: report_scheduler.send_now(date_str=date_str)
+                )
+
+            await update.message.reply_text(
+                "Daily report sent to your email.\n"
+                "Check your inbox (and spam folder)."
+            )
+        except Exception as e:
+            logger.error(f"/report error: {e}")
             await update.message.reply_text("An error occurred. Check server logs.")
 
     @authorized_only

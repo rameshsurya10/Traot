@@ -105,7 +105,28 @@ class DailyReportScheduler:
             self._thread.join(timeout=5.0)
         logger.info("Daily report scheduler stopped")
 
+    def _check_and_send_catchup(self):
+        """Send missed report if bot started after the configured send hour."""
+        try:
+            tz = timezone(timedelta(hours=self._tz_offset))
+            now = datetime.now(tz)
+            today_str = now.strftime('%Y-%m-%d')
+            if now.hour >= self._send_hour and self._last_sent_date != today_str:
+                logger.info(
+                    f"Catch-up: send hour {self._send_hour:02d}:00 already passed "
+                    f"(now {now.strftime('%H:%M')}). Sending yesterday's report..."
+                )
+                yesterday = now - timedelta(days=1)
+                self._send_report(yesterday.strftime('%Y-%m-%d'))
+                self._last_sent_date = today_str
+                logger.info("Catch-up report sent successfully")
+        except Exception as e:
+            logger.error(f"Catch-up report failed: {e}", exc_info=True)
+
     def _scheduler_loop(self):
+        # Catch-up on first iteration: send missed report if past send hour
+        self._check_and_send_catchup()
+
         while not self._stop_event.is_set():
             try:
                 tz = timezone(timedelta(hours=self._tz_offset))
@@ -162,6 +183,7 @@ class DailyReportScheduler:
             else:
                 logger.info("reportlab not installed — sending HTML-only email (no PDF)")
 
+            logger.info(f"Connecting to SMTP {self._smtp_host}:{self._smtp_port}...")
             with smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30) as server:
                 server.ehlo()
                 server.starttls()
@@ -170,6 +192,13 @@ class DailyReportScheduler:
                 server.send_message(msg)
 
             logger.info(f"Daily report sent to {recipient} for {date_str}")
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(
+                f"SMTP authentication failed for {self._smtp_user}. "
+                f"If using Gmail, ensure you're using an App Password: {e}"
+            )
+        except smtplib.SMTPException as e:
+            logger.error(f"SMTP error sending daily report: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to send daily report: {e}", exc_info=True)
 
